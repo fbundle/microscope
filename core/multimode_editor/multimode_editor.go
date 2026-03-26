@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"telescope/config"
-	"telescope/core/editor"
-	"telescope/core/insert_editor"
-	"telescope/core/util/text"
+	"microscope/config"
+	"microscope/core/editor"
+	"microscope/core/insert_editor"
+	"microscope/core/util/text"
 
-	"telescope/util/buffer"
+	"microscope/util/buffer"
 )
 
 type Mode = string

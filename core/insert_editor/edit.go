@@ -2,10 +2,10 @@ package insert_editor
 
 import (
 	"slices"
-	"telescope/core/editor"
-	"telescope/core/util/text"
+	"microscope/core/editor"
+	"microscope/core/util/text"
 
-	"telescope/util/side_channel"
+	"microscope/util/side_channel"
 )
 
 func (e *Editor) Type(ch rune) {

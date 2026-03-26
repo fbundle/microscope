@@ -5,7 +5,7 @@ import (
 	"errors"
 	"io"
 
-	"telescope/util/side_channel"
+	"microscope/util/side_channel"
 )
 
 func uint64ToBytes(x uint64) []byte {

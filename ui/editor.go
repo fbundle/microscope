@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
-	"telescope/config"
-	"telescope/core/editor"
-	"telescope/core/multimode_editor"
+	"microscope/config"
+	"microscope/core/editor"
+	"microscope/core/multimode_editor"
 	"time"
 
-	"telescope/util/side_channel"
+	"microscope/util/side_channel"
 
 	"github.com/gdamore/tcell/v2"
 )

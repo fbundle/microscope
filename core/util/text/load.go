@@ -2,7 +2,7 @@ package text
 
 import (
 	"iter"
-	"telescope/util/buffer"
+	"microscope/util/buffer"
 )
 
 func IndexFile(reader buffer.Reader) iter.Seq[int] {

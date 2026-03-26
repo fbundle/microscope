@@ -1,6 +1,6 @@
 package text
 
-import "telescope/util/buffer"
+import "microscope/util/buffer"
 
 const delim byte = '\n'
 

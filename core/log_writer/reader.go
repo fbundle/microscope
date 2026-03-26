@@ -3,8 +3,8 @@ package log_writer
 import (
 	"io"
 	"os"
-	"telescope/config"
-	"telescope/core/editor"
+	"microscope/config"
+	"microscope/core/editor"
 )
 
 func Read(filename string, apply func(e editor.LogEntry) bool) error {

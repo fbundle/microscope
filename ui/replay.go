@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"telescope/core/editor"
-	"telescope/core/log_writer"
+	"microscope/core/editor"
+	"microscope/core/log_writer"
 )
 
 func RunReplay(inputFilename string, logFilename string) error {

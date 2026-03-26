@@ -6,8 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"telescope/config"
-	"telescope/util/side_channel"
+	"microscope/config"
+	"microscope/util/side_channel"
 )
 
 func NonEmpty(filename string) bool {

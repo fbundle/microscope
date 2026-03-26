@@ -3,10 +3,10 @@ package log_writer
 import (
 	"encoding/json"
 	"errors"
-	"telescope/config"
-	"telescope/core/editor"
+	"microscope/config"
+	"microscope/core/editor"
 
-	"telescope/util/side_channel"
+	"microscope/util/side_channel"
 )
 
 type Serializer interface {

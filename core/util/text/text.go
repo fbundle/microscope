@@ -1,10 +1,10 @@
 package text
 
 import (
-	"telescope/util/side_channel"
+	"microscope/util/side_channel"
 
-	"telescope/util/buffer"
-	"telescope/util/persistent/seq"
+	"microscope/util/buffer"
+	"microscope/util/persistent/seq"
 )
 
 func New(reader buffer.Reader) Text {

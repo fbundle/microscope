@@ -4,13 +4,13 @@ import (
 	"bufio"
 	"context"
 	"os"
-	"telescope/core/editor"
-	"telescope/core/insert_editor"
-	"telescope/core/log_writer"
+	"microscope/core/editor"
+	"microscope/core/insert_editor"
+	"microscope/core/log_writer"
 
-	"telescope/util/side_channel"
+	"microscope/util/side_channel"
 
-	"telescope/util/buffer"
+	"microscope/util/buffer"
 
 	"golang.org/x/exp/mmap"
 )

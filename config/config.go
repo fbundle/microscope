@@ -7,13 +7,13 @@ import (
 	"sync"
 	"time"
 
-	"telescope/util/side_channel"
+	"microscope/util/side_channel"
 )
 
 const VERSION = "0.1.8c"
 
 const HELP = `
-Usage: "telescope [option] file [logfile]"
+Usage: "microscope [option] file [logfile]"
 Options:
   -h --help           show help
   -v --version        get version
@@ -88,8 +88,8 @@ var config *Config = nil
 
 func loadDefaultConfig() *Config {
 	tempDir := os.TempDir()
-	defaultLogDir := filepath.Join(tempDir, "telescope", "log")
-	defaultTmpDir := filepath.Join(tempDir, "telescope", "tmp")
+	defaultLogDir := filepath.Join(tempDir, "microscope", "log")
+	defaultTmpDir := filepath.Join(tempDir, "microscope", "tmp")
 	debug := len(os.Getenv("DEBUG")) > 0
 	// TODO - export these into environment variables
 	config := &Config{

@@ -1,8 +1,8 @@
 package insert_editor
 
 import (
-	"telescope/core/editor"
-	"telescope/core/util/text"
+	"microscope/core/editor"
+	"microscope/core/util/text"
 )
 
 func (e *Editor) gotoAndFixWithoutLock(row int, col int) {

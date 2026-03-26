@@ -1,7 +1,7 @@
 package insert_editor
 
 import (
-	"telescope/core/editor"
+	"microscope/core/editor"
 )
 
 func (e *Editor) renderWithoutLock() {

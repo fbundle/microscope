@@ -5,9 +5,9 @@ import (
 	"io"
 	"os"
 	"strings"
-	"telescope/config"
-	"telescope/core/editor"
-	"telescope/core/log_writer"
+	"microscope/config"
+	"microscope/core/editor"
+	"microscope/core/log_writer"
 )
 
 func RunLog(logFilename string) error {

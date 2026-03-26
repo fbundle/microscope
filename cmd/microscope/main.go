@@ -8,21 +8,21 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
-	"telescope/config"
-	"telescope/ui"
+	"microscope/config"
+	"microscope/ui"
 
-	"telescope/util/side_channel"
+	"microscope/util/side_channel"
 
-	"telescope/util/file_util"
+	"microscope/util/file_util"
 )
 
 func printHelp() {
-	fmt.Printf("telescope version %s\n", config.Load().VERSION)
+	fmt.Printf("microscope version %s\n", config.Load().VERSION)
 	fmt.Println(config.Load().HELP)
 }
 
 func printVersion() {
-	fmt.Printf("telescope version %s\n", config.Load().VERSION)
+	fmt.Printf("microscope version %s\n", config.Load().VERSION)
 }
 
 type programArgs struct {

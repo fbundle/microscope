@@ -4,17 +4,17 @@ mkdir -p bin
 
 # build - go tool dist list: list all platforms
 ## linux_riscv64
-GOOS=linux GOARCH=riscv64 go build -o bin/telescope_linux_riscv64 cmd/telescope/main.go &
+GOOS=linux GOARCH=riscv64 go build -o bin/microscope_linux_riscv64 cmd/microscope/main.go &
 ## linux_arm64
-GOOS=linux GOARCH=arm64 go build -o bin/telescope_linux_arm64 cmd/telescope/main.go &
+GOOS=linux GOARCH=arm64 go build -o bin/microscope_linux_arm64 cmd/microscope/main.go &
 ## linux_amd64
-GOOS=linux GOARCH=amd64 go build -o bin/telescope_linux_amd64 cmd/telescope/main.go &
+GOOS=linux GOARCH=amd64 go build -o bin/microscope_linux_amd64 cmd/microscope/main.go &
 ## darwin_arm64
-GOOS=darwin GOARCH=arm64 go build -o bin/telescope_darwin_arm64 cmd/telescope/main.go &
+GOOS=darwin GOARCH=arm64 go build -o bin/microscope_darwin_arm64 cmd/microscope/main.go &
 ## window_amd64
-GOOS=windows GOARCH=amd64  go build -o bin/telescope_windows_amd64.exe cmd/telescope/main.go &
+GOOS=windows GOARCH=amd64  go build -o bin/microscope_windows_amd64.exe cmd/microscope/main.go &
 ## window_arm64
-GOOS=windows GOARCH=amd64  go build -o bin/telescope_windows_arm64.exe cmd/telescope/main.go &
+GOOS=windows GOARCH=amd64  go build -o bin/microscope_windows_arm64.exe cmd/microscope/main.go &
 wait
 
 chmod +x bin/*

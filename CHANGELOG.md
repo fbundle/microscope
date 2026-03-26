@@ -46,6 +46,7 @@
 - improve robustness, now, interrupt like `SIGINT` (`Ctrl+C`) will preserve the log to restore later
 - fixed bug writing to not exist file
 - fixed empty command
+- rename the project from `telescope` into `microscope` - initially I thought of microscope but didn't connect to the english word
 
 # TODO
 

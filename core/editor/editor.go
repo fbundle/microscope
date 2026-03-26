@@ -2,9 +2,9 @@ package editor
 
 import (
 	"context"
-	"telescope/core/util/text"
+	"microscope/core/util/text"
 
-	"telescope/util/buffer"
+	"microscope/util/buffer"
 )
 
 type Cursor struct {

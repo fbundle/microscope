@@ -5,12 +5,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"telescope/config"
-	"telescope/core/util/text"
-	"telescope/util/file_util"
+	"microscope/config"
+	"microscope/core/util/text"
+	"microscope/util/file_util"
 	"time"
 
-	"telescope/util/side_channel"
+	"microscope/util/side_channel"
 )
 
 // all functions resulting in mode change

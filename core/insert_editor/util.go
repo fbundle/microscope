@@ -3,10 +3,10 @@ package insert_editor
 import (
 	"context"
 	"iter"
-	"telescope/config"
+	"microscope/config"
 	"time"
 
-	"telescope/util/side_channel"
+	"microscope/util/side_channel"
 )
 
 func insertToSlice[T any](l []T, i int, v T) []T {

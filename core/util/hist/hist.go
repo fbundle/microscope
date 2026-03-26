@@ -1,7 +1,7 @@
 package hist
 
 import (
-	"telescope/config"
+	"microscope/config"
 )
 
 func New[T any](t T) *Hist[T] {

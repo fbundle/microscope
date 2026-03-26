@@ -1,7 +1,7 @@
 package text
 
 import (
-	"telescope/util/persistent/seq"
+	"microscope/util/persistent/seq"
 )
 
 func MakeTextFromLine(lines [][]rune) Text {

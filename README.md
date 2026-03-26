@@ -1,4 +1,4 @@
-# TELESCOPE
+# microscope
 
 an extremely fast text editor
 
@@ -32,9 +32,9 @@ NOTE: the implementation of weight-balanced tree is wrong, refer to [github.com/
  
 ## INTERACTION WITH FILE SYSTEM
 
-0. use `telescope -h` for help
+0. use `microscope -h` for help
 
-1. when user opens a file using `telescope inputfile`, the program will create a log file (journal file) stored at `<tmp>/telescope_log/<path>` where `<tmp>` is system default temporary folder
+1. when user opens a file using `microscope inputfile`, the program will create a log file (journal file) stored at `<tmp>/microscope_log/<path>` where `<tmp>` is system default temporary folder
 
 2. when user edit the file, every action will be written to log file.
 
@@ -42,7 +42,7 @@ NOTE: the implementation of weight-balanced tree is wrong, refer to [github.com/
 
 4. user can use command `:w outputfile` to write the current file into a new file, if `outputfile` is empty, it will overwrite the current file and exit
 
-5. user use `telescope -r inputfile` to replay the log to make a new file. the program will write the output to stdout
+5. user use `microscope -r inputfile` to replay the log to make a new file. the program will write the output to stdout
 
 ## NOTES
 

@@ -3,7 +3,7 @@ package subsciber_pool
 import (
 	"sync/atomic"
 
-	"telescope/util/sync_util"
+	"microscope/util/sync_util"
 )
 
 type Pool[T any] struct {

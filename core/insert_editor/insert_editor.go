@@ -5,15 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"telescope/config"
-	"telescope/core/editor"
-	"telescope/core/util/hist"
-	"telescope/core/util/text"
+	"microscope/config"
+	"microscope/core/editor"
+	"microscope/core/util/hist"
+	"microscope/core/util/text"
 	"time"
 
-	"telescope/util/subsciber_pool"
+	"microscope/util/subsciber_pool"
 
-	"telescope/util/buffer"
+	"microscope/util/buffer"
 )
 
 type Editor struct {

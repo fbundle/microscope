@@ -3,8 +3,8 @@ package log_writer
 import (
 	"io"
 	"sync"
-	"telescope/config"
-	"telescope/core/editor"
+	"microscope/config"
+	"microscope/core/editor"
 )
 
 func New(writer io.Writer) (*Writer, error) {

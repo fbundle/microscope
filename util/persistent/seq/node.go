@@ -179,6 +179,7 @@ func balance[T any](n *node[T]) *node[T] {
 		panic("not_here")
 	}
 }
+
 func set[T any](n *node[T], i uint64, entry T) *node[T] {
 	if n == nil {
 		panic("index out of range")
@@ -258,7 +259,7 @@ func merge[T any](l *node[T], r *node[T]) *node[T] {
 	if r == nil {
 		return l
 	}
-	// small optimization, we del from the larger subtree
+	// small optimization, we delete from the larger subtree
 	wl, wr := weight(l), weight(r)
 	if wl > wr {
 		entry := get(l, wl-1)
@@ -310,7 +311,7 @@ func _map[T any, T1 any](n *node[T], f func(T) T1) *node[T1] {
 	if n == nil {
 		return nil
 	}
-	return makeNode(f(n.entry), _map(n.left, f), _map(n.right, f))
+	return makeNode(f(n.entry), _map[T, T1](n.left, f), _map[T, T1](n.right, f))
 }
 
 func _seq[T any, T1 any](fs *node[func(T) T1], xs *node[T]) *node[T1] {

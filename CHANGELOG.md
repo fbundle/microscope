@@ -47,6 +47,7 @@
 - fixed bug writing to not exist file
 - fixed empty command
 - rename the project from `telescope` into `microscope` - initially I thought of microscope but didn't connect to the english word
+- fix WBT for the case adding single lines (not for merging and cutting multiple lines)
 
 # TODO
 

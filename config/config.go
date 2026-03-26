@@ -10,7 +10,7 @@ import (
 	"microscope/util/side_channel"
 )
 
-const VERSION = "0.1.8c"
+const VERSION = "0.1.9"
 
 const HELP = `
 Usage: "microscope [option] file [logfile]"

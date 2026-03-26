@@ -1,9 +1,5 @@
 package seq
 
-const (
-	delta = 3
-)
-
 // implement persistent sequence using weight-balanced tree
 
 type node[T any] struct {
@@ -70,52 +66,119 @@ func iter[T any](n *node[T], f func(e T) bool) bool {
 	return iter(n.right, f)
 }
 
-func balance[T any](n *node[T]) *node[T] {
-	// assuming both n.left and n.right are balance, then this return a balanced tree
+const delta uint64 = 3
+
+type ordering int
+
+const (
+	orderingEq ordering = 0
+	orderingGt ordering = +1
+	orderingLt ordering = -1
+)
+
+// cmp - returns orderingEq, orderingGt, or orderingLt
+func cmp[T any](n *node[T]) ordering {
 	if n == nil {
-		return nil
+		return orderingEq
+	} else {
+		l, r := weight(n.left), weight(n.right)
+		if l+r <= 1 {
+			return orderingEq
+		} else if l > delta*r {
+			return orderingGt
+		} else if delta*l < r {
+			return orderingLt
+		} else {
+			return orderingEq
+		}
 	}
-	if weight(n.left)+weight(n.right) <= 1 {
-		return n
-	}
-	if weight(n.left) > delta*weight(n.right) { // left is guaranteed to be non-nil
-		// right rotate
-		//         n
-		//   l           r
-		// ll lr
-		//
-		//      becomes
-		//
-		//         l
-		//   ll          n
-		//             lr r
-
-		l, r := n.left, n.right
-		ll, lr := l.left, l.right
-		n1 := balance(makeNode(n.entry, lr, r))
-		l1 := makeNode(l.entry, ll, n1)
-		return l1
-	} else if delta*weight(n.left) < weight(n.right) { // right is guaranteed to be non-nil
-		// left rotate
-		//         n
-		//   l           r
-		//             rl rr
-		//
-		//      becomes
-		//
-		//         r
-		//   n          rr
-		//  l rl
-
-		l, r := n.left, n.right
-		rl, rr := r.left, r.right
-		n1 := balance(makeNode(n.entry, l, rl))
-		r1 := makeNode(r.entry, n1, rr)
-		return r1
-	}
-	return n
 }
 
+func rightRotate[T any](n *node[T]) *node[T] {
+	// assume n is non-nil
+	if n == nil {
+		panic("not_here")
+	}
+
+	// right rotate
+	//         n
+	//   l           r
+	// ll lr
+	//
+	//      becomes
+	//
+	//         l
+	//   ll          n
+	//             lr r
+
+	l, r := n.left, n.right
+	ll, lr := l.left, l.right
+
+	n1 := makeNode(n.entry, lr, r)
+	l1 := makeNode(l.entry, ll, n1)
+	return l1
+}
+
+func leftRotate[T any](n *node[T]) *node[T] {
+	// assume n is non-nil
+	if n == nil {
+		panic("not_here")
+	}
+
+	// left rotate
+	//         n
+	//   l           r
+	//             rl rr
+	//
+	//      becomes
+	//
+	//         r
+	//   n          rr
+	//  l rl
+
+	r, l := n.right, n.left
+	rl, rr := r.left, r.right
+	n1 := makeNode(n.entry, l, rl)
+	r1 := makeNode(r.entry, n1, rr)
+	return r1
+}
+
+func balance[T any](n *node[T]) *node[T] {
+	// assuming δ ≥ 3
+	// assuming the two subtrees n.left and n.right are balanced
+	// do single rotation or double rotation to rebalance the tree
+	// double rotation is necessary - see `why_double_rotation.jpeg`
+	// will be be sufficient for merge and split? TODO
+
+	switch cmp(n) {
+	case orderingEq:
+		return n
+	case orderingGt:
+		n1 := rightRotate(n)
+		if cmp(n1) == orderingEq {
+			return n1
+		} else {
+			l := n.left
+			l1 := leftRotate(l)
+			n2 := makeNode(n.entry, l1, n.right)
+			n3 := rightRotate(n2)
+			return n3
+		}
+	case orderingLt:
+		n1 := leftRotate(n)
+		if cmp(n1) == orderingEq {
+			return n1
+		} else {
+			r := n.right
+			r1 := rightRotate(r)
+			n2 := makeNode(n.entry, n.left, r1)
+			n3 := leftRotate(n2)
+			return n3
+		}
+	default:
+		panic("not_here")
+	}
+}
 func set[T any](n *node[T], i uint64, entry T) *node[T] {
 	if n == nil {
 		panic("index out of range")

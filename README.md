@@ -2,9 +2,15 @@
 
 an extremely fast text editor
 
-NOTE: the implementation of weight-balanced tree is wrong, refer to [github.com/fbundle/wbt](https://github.com/fbundle/wbt) for the correct one
 
 ![screenshot](./screenshots/0_1_2.png)
+
+## NOTE
+
+- refer to [github.com/fbundle/wbt](https://github.com/fbundle/wbt) for WBT
+
+- the current implementation of weight-balanced tree doesn't support efficient merging and cutting
+
 
 ## FEATURE SET
 

@@ -9,7 +9,7 @@ an extremely fast text editor
 
 - refer to [github.com/fbundle/wbt](https://github.com/fbundle/wbt) for WBT
 
-- the current implementation of weight-balanced tree doesn't support efficient merging and cutting
+- the current implementation of weight-balanced tree doesn't support efficient merging
 
 
 ## FEATURE SET

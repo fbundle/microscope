@@ -148,7 +148,7 @@ func balance[T any](n *node[T]) *node[T] {
 	// assuming the two subtrees n.left and n.right are balanced
 	// do single rotation or double rotation to rebalance the tree
 	// double rotation is necessary - see `why_double_rotation.jpeg`
-	// will be be sufficient for merge and split? TODO
+	// will be be sufficient for merge? TODO
 
 	switch cmp(n) {
 	case orderingEq:

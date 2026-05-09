@@ -1,0 +1,3934 @@
+below is the readme and implementation of a text editor
+./CHANGELOG.md
+# FEATURE
+
+- very basic text editor
+- added basic keyboard support: `Ctrl+C,Ctrl+S`, `Enter`, `Backspace`, `Delete`, `Left,Right,Up,Down,Home,End,PgUp,PgDn`
+- first working code - file are loaded lazily
+- improved performance with mmap
+- added option for read only
+- added loading status - basically execute draw every second
+- [experimental] added parallel indexing, use `PARALLEL_INDEXING=1` to enable
+- fixed for too short characters - render give the whole row not according to window width anymore
+- change frontend to tcell - much better
+- improved structure, improve frontend
+- added journal file (file is saved every 10 seconds or when buffer is full), use `DISABLE_JOURNAL=1` to disable
+- add journal file replay, remove save function completely. if user wants to save a file, they has to use `telescope -r <input_file>`, the content will be written to stdout. `DISABLE_JOURNAL=1` no longer works
+- rename journal to log
+- fix a critical bug, printing using fmt.Fprintf doesn't escape `%` in code
+- log is now use length-prefixed format so that the same file can be decoded using multiple format
+- add function to print out human readable log format
+- fixed exit condition - bufio.Writer is used, log will be written at the end of the program or every `LOG_FLUSH_INTERVAL_S=60` seconds
+- fixed a bug that the UI keeps reading `mmap.ReaderAt` while is it already closed - just return `[]rune{}` if the file is closed
+- decompose loading and editor logic
+- improve robustness
+- added undo redo with `Ctrl+U` and `Ctrl+R`, added keyboard shortcuts in help message
+- added max history size
+- fixed some bug when refactoring code, fix some rendering bug and improve usability
+- fixed bug with replaying log
+- remove exitting delay
+- [experimental] added VISUAL/COMMAND/INSERT mode
+- fixed VISUAL/COMMAND/INSERT mode sometimes hangs at start-up
+- fixed bug when typing to the right end of the screen
+- added default behavior when there is no input file specified
+- added regexp search
+- refactor - VISUAL/COMMAND/INSERT is now default
+- rename VISUAL -> NORMAL
+- added clipboard and selector, now has 4 modes: NORMAL COMMAND VISUAL INSERT
+- fixed bug pgdn doesn't register selector
+- optimize size of `core.text.Line` to a 16 bytes
+- make clipboard just another persistent vector (`vector.Vector`) to save space and copying more efficient (but log still contains the whole text)
+- `vector.Vector` -> `seq.Seq`
+- added write to input file, when user use `:w` without specifying an output file, program will load input file into memory and write it back to the input file
+- added commands: `:w` to overwrite the file, `:q! = :q`, `:wq = :w`
+- added using `b` or `g` to go to beg of file, `e` or `G` to go to end of file 
+- added basic mouse support: scroll up, scroll down, left click
+- update interface
+- added `gotoAndFixWithoutLock` to absolute position
+- improve robustness, now, interrupt like `SIGINT` (`Ctrl+C`) will preserve the log to restore later
+- fixed bug writing to not exist file
+- fixed empty command
+- rename the project from `telescope` into `microscope` - initially I thought of microscope but didn't connect to the english word
+- fix WBT for the case adding single lines (not for merging and cutting multiple lines)
+
+# TODO
+
+- added cache for file loading
+- optimize size of `core.text.Line` to a single `int64`
+- make binary serializer works with delete lines and insert lines
+- add compressed log: compress multiple `type` into a single `type` (`Text []rune` instead of `Rune rune`)
+./README.md
+# microscope
+
+an extremely fast text editor
+
+
+![screenshot](./screenshots/0_1_2.png)
+
+## NOTE
+
+- refer to [github.com/fbundle/wbt](https://github.com/fbundle/wbt) for WBT
+
+- the current implementation of weight-balanced tree doesn't support efficient merging
+
+
+## FEATURE SET
+
+- basic text editor
+    - navigate with `Left`, `Right`, `Up`, `Down`, `PgUp`, `PgDn`, `Home`, `End`
+    - undo redo with `Ctrl+U`, `Ctrl+R`
+
+- instant start-up, instant edit
+
+- able to handle very large files, potentially even larger than system memory.
+
+- able to recover from crash
+
+- able to edit while still loading the file and exit without losing any progress
+
+- vim-like command mode, search, goto line, etc.
+
+## RELEASE MODEL
+
+- initial release comes with no suffix, e.g. `0.1.7`
+
+- bug fix releases come with suffix, e.g. `0.1.7a, 0.1.7b`
+
+- the latest stable release should be one lower than latest releast with highest suffix. for example, if `0.1.7b` is the latest release, then `0.1.6z` is the stable release
+ 
+## INTERACTION WITH FILE SYSTEM
+
+0. use `microscope -h` for help
+
+1. when user opens a file using `microscope inputfile`, the program will create a log file (journal file) stored at `<tmp>/microscope_log/<path>` where `<tmp>` is system default temporary folder
+
+2. when user edit the file, every action will be written to log file.
+
+3. when exit the program the log file is preserved to export
+
+4. user can use command `:w outputfile` to write the current file into a new file, if `outputfile` is empty, it will overwrite the current file and exit
+
+5. user use `microscope -r inputfile` to replay the log to make a new file. the program will write the output to stdout
+
+## NOTES
+
+update `go.mod` directly from github `GOPROXY=direct go mod tidy`
+
+
+
+
+./ui/log.go
+package ui
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"microscope/config"
+	"microscope/core/editor"
+	"microscope/core/log_writer"
+)
+
+func RunLog(logFilename string) error {
+	s, err := log_writer.GetSerializer(config.Load().INITIAL_SERIALIZER_VERSION)
+	if err != nil {
+		return err
+	}
+
+	err = log_writer.Read(logFilename, func(e editor.LogEntry) bool {
+		var b []byte
+		b, err = s.Marshal(e)
+		if err != nil {
+			return false
+		}
+		_, err = fmt.Fprintln(os.Stdout, strings.TrimSpace(string(b)))
+		if err != nil {
+			return false
+		}
+		return true
+	})
+	if err == io.EOF {
+		err = nil
+	}
+	return err
+}
+./ui/util.go
+package ui
+
+import (
+	"bufio"
+	"context"
+	"os"
+	"microscope/core/editor"
+	"microscope/core/insert_editor"
+	"microscope/core/log_writer"
+
+	"microscope/util/side_channel"
+
+	"microscope/util/buffer"
+
+	"golang.org/x/exp/mmap"
+)
+
+type finalizer struct {
+	flush      func() error
+	closerList []func() error
+}
+
+func (c *finalizer) Close() {
+	for i := len(c.closerList) - 1; i >= 0; i-- {
+		_ = c.closerList[i]()
+	}
+}
+
+func (c *finalizer) Flush() error {
+	if c.flush == nil {
+		return nil
+	}
+	return c.flush()
+}
+
+func makeInsertEditor(
+	ctx context.Context,
+	inputFilename string, logFilename string,
+	width int, height int,
+) (insertEditor *insert_editor.Editor, loadCtx context.Context, f *finalizer, err error) {
+	f = &finalizer{}
+
+	insertEditor, err = insert_editor.New(height, width)
+	if err != nil {
+		f.Close()
+		return nil, nil, nil, err
+	}
+	var inputBuffer buffer.Reader = nil
+	if len(inputFilename) > 0 {
+		inputMmapReader, err := mmap.Open(inputFilename)
+		if err != nil {
+			f.Close()
+			return nil, nil, nil, err
+		}
+		f.closerList = append(f.closerList, inputMmapReader.Close)
+		inputBuffer = inputMmapReader
+	}
+	loadCtx, err = insertEditor.Load(ctx, inputBuffer)
+	if err != nil {
+		f.Close()
+		return nil, nil, nil, err
+	}
+	if len(logFilename) > 0 {
+		logFile, err := os.OpenFile(logFilename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+		if err != nil {
+			f.Close()
+			return nil, nil, nil, err
+		}
+		f.closerList = append(f.closerList, logFile.Close)
+		writer := bufio.NewWriter(logFile)
+		f.closerList = append(f.closerList, writer.Flush)
+		logWriter, err := log_writer.New(writer)
+		if err != nil {
+			f.Close()
+			return nil, nil, nil, err
+		}
+		f.flush = writer.Flush
+
+		insertEditor.Subscribe(func(entry editor.LogEntry) {
+			err := logWriter.Write(entry)
+			if err != nil {
+				side_channel.Panic(err)
+			}
+		})
+	}
+	return insertEditor, loadCtx, f, nil
+}
+
+func writeMessage(e editor.Editor, message string) {
+	e.Status(func(status editor.Status) editor.Status {
+		status.Message = message
+		return status
+	})
+}
+./ui/replay.go
+package ui
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"microscope/core/editor"
+	"microscope/core/log_writer"
+)
+
+func RunReplay(inputFilename string, logFilename string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, _ = fmt.Fprintf(os.Stderr, "loading input file %s\n", inputFilename)
+
+	// make insert_editor without log_writer
+	insertEditor, loadCtx, finalizer, err := makeInsertEditor(ctx, inputFilename, "", 20, 20)
+	if err != nil {
+		return err
+	}
+	defer finalizer.Close()
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case view := <-insertEditor.Update(): // consume view
+				if len(view.Status.Background) > 0 {
+					_, _ = fmt.Fprintln(os.Stderr, view.Status.Background)
+				}
+			}
+		}
+	}()
+
+	// wait for loading
+	<-loadCtx.Done()
+
+	_, _ = fmt.Fprintf(os.Stderr, "loading log_writer file %s\n", logFilename)
+
+	err = log_writer.Read(logFilename, func(entry editor.LogEntry) bool {
+		insertEditor.Apply(entry)
+		return true
+	})
+	if err != nil && err != io.EOF {
+		return err
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "replaying file\n")
+	t := insertEditor.Render().Text
+	for _, line := range t.Iter {
+		_, _ = fmt.Fprintln(os.Stdout, string(line))
+	}
+	return nil
+}
+./ui/draw.go
+package ui
+
+import "github.com/gdamore/tcell/v2"
+
+type drawFunc = func(x int, y int, primary rune, combining []rune, style tcell.Style)
+type drawCtx = func(func(width int, height int, draw drawFunc))
+
+// makeDrawContext - draw into a rectangle (offsetX int, offsetY int, width int, height int)
+func makeDrawContext(s tcell.Screen, offsetX int, offsetY int, width int, height int) drawCtx {
+	return func(f func(width int, height int, draw drawFunc)) {
+		f(width, height, func(x int, y int, primary rune, combining []rune, style tcell.Style) {
+			if 0 <= x && x < width && 0 <= y && y < height {
+				s.SetContent(offsetX+x, offsetY+y, primary, combining, style)
+			}
+		})
+	}
+}
+./ui/editor.go
+package ui
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"runtime/debug"
+	"microscope/config"
+	"microscope/core/editor"
+	"microscope/core/multimode_editor"
+	"time"
+
+	"microscope/util/side_channel"
+
+	"github.com/gdamore/tcell/v2"
+)
+
+var interruptError = errors.New("interrupted")
+
+func getModeAndCommand(m map[string]any) (string, string) {
+	if m == nil {
+		return "", ""
+	}
+	mode := ""
+	s, ok := m["mode"]
+	if ok {
+		mode = fmt.Sprintf("%v", s)
+	}
+	command := ""
+	s, ok = m["command"]
+	if ok {
+		command = fmt.Sprintf("%v", s)
+	}
+	return mode, command
+}
+
+func getSelector(m map[string]any) *multimode_editor.Selector {
+	if m == nil {
+		return nil
+	}
+	s, ok := m["selector"]
+	if !ok {
+		return nil
+	}
+	selector, ok := s.(*multimode_editor.Selector)
+	if !ok {
+		return nil
+	}
+	if selector == nil {
+		return nil
+	}
+	return selector
+}
+
+func getStatusStyle(mode string) tcell.Style {
+	switch mode {
+	case multimode_editor.ModeNormal:
+		return tcell.StyleDefault.Background(tcell.ColorLightGray).Foreground(tcell.ColorBlack)
+	case multimode_editor.ModeInsert:
+		return tcell.StyleDefault.Background(tcell.ColorLightYellow).Foreground(tcell.ColorBlack)
+	case multimode_editor.ModeSelect:
+		return tcell.StyleDefault.Background(tcell.ColorLightGreen).Foreground(tcell.ColorBlack)
+	case multimode_editor.ModeCommand:
+		return tcell.StyleDefault.Background(tcell.ColorLightBlue).Foreground(tcell.ColorBlack)
+	default:
+		return tcell.StyleDefault.Background(tcell.ColorLightGray).Foreground(tcell.ColorBlack)
+	}
+}
+
+func getTextStyle(textRow int, selector *multimode_editor.Selector) tcell.Style {
+	if selector != nil {
+		beg, end := selector.Interval()
+		if beg <= textRow && textRow <= end {
+			return tcell.StyleDefault.Background(tcell.ColorLightGray).Foreground(tcell.ColorBlack)
+		}
+	}
+	return tcell.StyleDefault
+}
+
+func draw(s tcell.Screen, view editor.View) {
+	s.Clear()
+	screenWidth, screenHeight := s.Size()
+	selector := getSelector(view.Status.Other)
+
+	// Draw cursor from (0, 0)
+	col := view.Cursor.Col - view.Window.TlCol
+	row := view.Cursor.Row - view.Window.TlRow
+	s.ShowCursor(col, row)
+
+	// Draw content from (0, 0) -> (screenWidth-1, screenHeight-2)
+	contentDrawContext := makeDrawContext(s, 0, 0, screenWidth, screenHeight-1)
+	contentDrawContext(func(width int, height int, draw drawFunc) {
+		t := view.Text
+		for relRow := 0; relRow < height; relRow++ {
+			row := view.Window.TlRow + relRow
+			style := getTextStyle(row, selector)
+			var line []rune = nil
+			if row < t.Len() {
+				line = t.Get(row)
+			}
+
+			for relCol := 0; relCol < width; relCol++ {
+				col := view.Window.TlCol + relCol
+				ch := ' '
+				if col < len(line) {
+					ch = line[col]
+				}
+				if row >= t.Len() && relCol == 0 {
+					ch = '~' // special case
+				}
+				draw(relCol, relRow, ch, nil, style)
+			}
+		}
+	})
+
+	// Draw the status bar at the bottom (screenHeight-1)
+	statusDrawContext := makeDrawContext(s, 0, screenHeight-1, screenWidth, 1)
+	statusDrawContext(func(width int, height int, draw drawFunc) {
+		sep := []rune(" > ")
+		mode, command := getModeAndCommand(view.Status.Other)
+		style := getStatusStyle(mode)
+
+		// draw bottom bar
+		for col := 0; col < width; col++ {
+			draw(col, 0, ' ', nil, style)
+		}
+		// draw background
+		var fromRight []rune = nil
+		if len(view.Status.Background) > 0 {
+			fromRight = append(fromRight, sep...)
+			fromRight = append(fromRight, []rune(view.Status.Background)...)
+			fromRight = append(fromRight, ' ')
+		}
+		for i, ch := range fromRight {
+			col := i + width - len(fromRight)
+			draw(col, 0, ch, nil, style)
+		}
+		// draw mode, cursor, command, messge
+		var fromLeft []rune
+		fromLeft = append(fromLeft, []rune(fmt.Sprintf(" %s (%d, %d)", mode, view.Cursor.Row+1, view.Cursor.Col+1))...)
+		if len(command) > 0 {
+			fromLeft = append(fromLeft, sep...)
+			fromLeft = append(fromLeft, []rune(command)...)
+		}
+		if len(view.Status.Message) > 0 {
+			fromLeft = append(fromLeft, sep...)
+			fromLeft = append(fromLeft, []rune(view.Status.Message)...)
+		}
+		for col, ch := range fromLeft {
+			draw(col, 0, ch, nil, style)
+		}
+
+	})
+
+	s.Show()
+}
+
+type quitEvent struct {
+	when time.Time
+}
+
+func (e quitEvent) When() time.Time {
+	return e.when
+}
+
+func sendQuitEvent(s tcell.Screen) {
+	now := time.Now()
+	for i := 0; i < 5; i++ {
+		if err := s.PostEvent(quitEvent{when: now}); err != nil {
+			if errors.Is(err, tcell.ErrEventQFull) {
+				time.Sleep(100 * time.Millisecond) // retry stopping
+				continue
+			}
+			side_channel.Panic(err)
+			return
+		} else {
+			return
+		}
+	}
+}
+
+func RunEditor(inputFilename string, logFilename string, multiMode bool) error {
+	defer func() {
+		if r := recover(); r != nil {
+			side_channel.WriteLn(string(debug.Stack()))
+			side_channel.Panic(r)
+		}
+	}()
+
+	s, err := tcell.NewScreen()
+	if err != nil {
+		return err
+	}
+	if err = s.Init(); err != nil {
+		return err
+	}
+	defer s.Fini()
+
+	s.EnableMouse()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	width, height := s.Size()
+
+	var e editor.Editor
+	// make editor
+	insertEditor, loadCtx, finalizer, err := makeInsertEditor(ctx, inputFilename, logFilename, width, height-1)
+	if err != nil {
+		return err
+	}
+	defer finalizer.Close()
+	flush := func() {
+		if err := finalizer.Flush(); err != nil {
+			writeMessage(e, fmt.Sprintf("flush error: %v", err))
+		} else {
+			writeMessage(e, "log_writer flushed")
+		}
+	}
+
+	if multiMode {
+		stop := func() {
+			cancel()
+			sendQuitEvent(s)
+		}
+		e = multimode_editor.New(insertEditor, stop, inputFilename)
+	} else {
+		e = insertEditor
+	}
+
+	// draw loop
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case view := <-e.Update():
+				draw(s, view)
+			}
+		}
+	}()
+	// manual flush loop in the event of crash
+	go func() {
+		ticker := time.NewTicker(config.Load().LOG_AUTOFLUSH_INTERVAL)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				flush()
+			}
+		}
+	}()
+
+	// event loop
+	for {
+		event := s.PollEvent()
+		switch event := event.(type) {
+		case quitEvent, *quitEvent:
+			// quit from insert_editor - delete log
+			writeMessage(e, "exiting... ")
+			_ = os.Remove(logFilename)
+			<-loadCtx.Done()
+			return nil
+		case *tcell.EventMouse:
+			handleEditorMouse(e, event)
+		case *tcell.EventKey:
+			if event.Key() == tcell.KeyCtrlC {
+				return interruptError
+			} else if event.Key() == tcell.KeyCtrlS {
+				flush()
+			} else {
+				handleEditorKey(e, event)
+			}
+
+		case *tcell.EventResize:
+			s.Sync()
+			width, height = s.Size()
+			e.Resize(height-1, width)
+		default:
+			// nothing
+		}
+	}
+}
+
+func handleEditorMouse(e editor.Editor, ev *tcell.EventMouse) {
+	col, row := ev.Position()
+	button := ev.Buttons()
+	switch {
+	case button&tcell.Button1 != 0:
+		e.Action("mouse_click_left", editor.Cursor{
+			Row: row,
+			Col: col,
+		})
+	case button&tcell.Button2 != 0:
+		e.Action("mouse_click_right", editor.Cursor{
+			Row: row,
+			Col: col,
+		})
+	case button&tcell.Button3 != 0:
+		e.Action("mouse_click_right", editor.Cursor{
+			Row: row,
+			Col: col,
+		})
+	case button&tcell.Button4 != 0:
+		e.Action("mouse_scroll_left")
+
+	case button&tcell.Button5 != 0:
+		e.Action("mouse_scroll_right")
+	case button&tcell.WheelUp != 0:
+		e.Action("mouse_scroll_up")
+
+	case button&tcell.WheelDown != 0:
+		e.Action("mouse_scroll_down")
+	case button == tcell.ButtonNone:
+		//e.Action("mouse_none", editor.Position{
+		//		Row: row,
+		//		Col: col,
+		//	})
+	}
+}
+
+func handleEditorKey(e editor.Editor, ev *tcell.EventKey) {
+	switch ev.Key() {
+	case tcell.KeyRune:
+		e.Type(ev.Rune())
+	case tcell.KeyEnter:
+		e.Enter()
+	case tcell.KeyBackspace, tcell.KeyBackspace2:
+		e.Backspace()
+	case tcell.KeyDelete:
+		e.Delete()
+
+	case tcell.KeyEsc:
+		e.Action("key_escape")
+	case tcell.KeyTab:
+		e.Action("key_tabular")
+
+	case tcell.KeyRight:
+		e.MoveRight()
+	case tcell.KeyLeft:
+		e.MoveLeft()
+	case tcell.KeyUp:
+		e.MoveUp()
+	case tcell.KeyDown:
+		e.MoveDown()
+	case tcell.KeyHome:
+		e.MoveHome()
+	case tcell.KeyEnd:
+		e.MoveEnd()
+	case tcell.KeyPgUp:
+		e.MovePageUp()
+	case tcell.KeyPgDn:
+		e.MovePageDown()
+	case tcell.KeyCtrlU:
+		e.Undo()
+	case tcell.KeyCtrlR:
+		e.Redo()
+	default:
+		writeMessage(e, fmt.Sprintf("unknown key %v", ev.Name()))
+	}
+}
+./cmd/microscope/main.go
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"runtime/debug"
+	"strings"
+	"microscope/config"
+	"microscope/ui"
+
+	"microscope/util/side_channel"
+
+	"microscope/util/file_util"
+)
+
+func printHelp() {
+	fmt.Printf("microscope version %s\n", config.Load().VERSION)
+	fmt.Println(config.Load().HELP)
+}
+
+func printVersion() {
+	fmt.Printf("microscope version %s\n", config.Load().VERSION)
+}
+
+type programArgs struct {
+	option         string
+	firstFilename  string
+	secondFilename string
+}
+
+func main() {
+	defer func() {
+		if err := recover(); err != nil {
+			stack := string(debug.Stack())
+			fmt.Println(stack)
+			fmt.Println(err)
+			side_channel.WriteLn(stack)
+			side_channel.Panic(err)
+		}
+	}()
+
+	args := getProgramArgs()
+	switch args.option {
+	case "-h", "--help":
+		printHelp()
+		return
+	case "-v", "--version":
+		printVersion()
+		return
+	case "-r", "--replay":
+		if err := ui.RunReplay(args.firstFilename, args.secondFilename); err != nil {
+			log.Fatalln(err)
+		}
+	case "-l", "--log_writer":
+		err := ui.RunLog(args.firstFilename)
+		if err != nil {
+			side_channel.Panic(err)
+		}
+	case "-i", "--insert":
+		if !promptDeleteLogFile(args) {
+			return
+		}
+		err := ui.RunEditor(args.firstFilename, args.secondFilename, false)
+		if err != nil {
+			side_channel.Panic(err)
+		}
+	case "--unsafe":
+		err := ui.RunEditor(args.firstFilename, "", true)
+		if err != nil {
+			side_channel.Panic(err)
+		}
+	default:
+		// by default - open with command mode
+		if !promptDeleteLogFile(args) {
+			return
+		}
+		err := ui.RunEditor(args.firstFilename, args.secondFilename, true)
+		if err != nil {
+			side_channel.Panic(err)
+		}
+	}
+}
+
+func promptYesNo(prompt string, defaultOption bool) bool {
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		if defaultOption {
+			fmt.Print(prompt + " [Y/n]: ")
+		} else {
+			fmt.Print(prompt + " [y/N]: ")
+		}
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Println("Error reading input:", err)
+			continue
+		}
+		input = strings.ToLower(strings.TrimSpace(input))
+		if len(input) == 0 {
+			return defaultOption
+		}
+		switch input {
+		case "y", "yes":
+			return true
+		case "n", "no":
+			return false
+		default:
+			return false
+		}
+	}
+}
+
+func promptDeleteLogFile(args programArgs) bool {
+	if file_util.NonEmpty(args.secondFilename) {
+		ok := promptYesNo(fmt.Sprintf("log_writer file exists (%s), delete it?", args.secondFilename), false)
+		if !ok {
+			return false
+		}
+		err := os.Remove(args.secondFilename)
+		if err != nil {
+			side_channel.Panic(err)
+		}
+		return true
+	}
+	return true
+}
+
+func getDefaultLogFilename(inputFilename string) (firstFilename string, secondFilename string) {
+	if file_util.NonEmpty(inputFilename) {
+		firstFilename, _ = filepath.Abs(inputFilename)
+		secondFilename = filepath.Join(config.Load().LOG_DIR, firstFilename)
+	} else {
+		firstFilename = ""
+		secondFilename = filepath.Join(config.Load().LOG_DIR, "empty_file")
+	}
+	err := os.MkdirAll(filepath.Dir(secondFilename), 0o700)
+	if err != nil {
+		side_channel.Panic(err)
+		return "", ""
+	}
+
+	return firstFilename, secondFilename
+}
+
+func consume(args []string) ([]string, string) {
+	if len(args) == 0 {
+		return []string{}, ""
+	}
+	return args[1:], args[0]
+}
+func peek(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
+}
+func getProgramArgs() programArgs {
+	args := os.Args[1:]
+	pargs := programArgs{}
+
+	if head := peek(args); len(head) > 0 && head[0] == '-' {
+		args, pargs.option = consume(args)
+	}
+	args, pargs.firstFilename = consume(args)
+	args, pargs.secondFilename = consume(args)
+	if len(pargs.secondFilename) == 0 {
+		pargs.firstFilename, pargs.secondFilename = getDefaultLogFilename(pargs.firstFilename)
+	} else {
+		pargs.firstFilename, _ = getDefaultLogFilename(pargs.firstFilename)
+	}
+	return pargs
+}
+./core/multimode_editor/multimode_editor.go
+package multimode_editor
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"microscope/config"
+	"microscope/core/editor"
+	"microscope/core/insert_editor"
+	"microscope/core/util/text"
+
+	"microscope/util/buffer"
+)
+
+type Mode = string
+
+const (
+	ModeNormal  Mode = "NORMAL"
+	ModeCommand Mode = "COMMAND"
+	ModeInsert  Mode = "INSERT"
+	ModeSelect  Mode = "SELECT"
+)
+
+type Selector struct {
+	beg int
+	end int
+}
+
+func (s *Selector) Interval() (beg int, end int) {
+	beg, end = s.beg, s.end
+	if beg > end {
+		beg, end = end, beg
+	}
+	return beg, end
+}
+
+type clipboard = text.Text
+
+type state struct {
+	mode      Mode
+	command   string
+	selector  *Selector
+	clipboard clipboard
+}
+
+type Editor struct {
+	stop              func()
+	mu                sync.Mutex
+	e                 *insert_editor.Editor
+	defaultOutputFile string
+	state             state
+}
+
+func (c *Editor) enterNormalModeWithoutLock() {
+	c.state.mode = ModeNormal
+	c.state.command = ""
+	c.state.selector = nil
+}
+func (c *Editor) enterInsertModeWithoutLock() {
+	c.state.mode = ModeInsert
+	c.state.command = ""
+	c.state.selector = nil
+}
+func (c *Editor) enterCommandModeWithoutLock(command string) {
+	c.state.mode = ModeCommand
+	c.state.command = command
+	c.state.selector = nil
+}
+func (c *Editor) enterSelectModeWithoutLock(beg int) {
+	c.state.mode = ModeSelect
+	c.state.command = ""
+	c.state.selector = &Selector{
+		beg: beg,
+		end: beg,
+	}
+}
+
+func (c *Editor) Update() <-chan editor.View {
+	return c.e.Update()
+}
+
+func (c *Editor) Load(ctx context.Context, reader buffer.Reader) (loadCtx context.Context, err error) {
+	c.lock(func() {
+		loadCtx, err = c.e.Load(ctx, reader)
+	})
+	return loadCtx, err
+}
+
+func (c *Editor) Resize(height int, width int) {
+	c.lock(func() {
+		c.e.Resize(height, width)
+	})
+}
+
+func (c *Editor) Goto(row int, col int) {
+	c.lock(func() {
+		c.e.Goto(row, col)
+	})
+}
+
+func (c *Editor) MoveLeft() {
+	c.lock(func() {
+		c.e.MoveLeft()
+	})
+}
+
+func (c *Editor) MoveRight() {
+	c.lock(func() {
+		c.e.MoveRight()
+	})
+}
+
+func (c *Editor) MoveUp() {
+	c.lock(func() {
+		c.e.MoveUp()
+		if c.state.mode == ModeSelect {
+			row := c.e.Render().Cursor.Row
+			c.state.selector.end = row
+			c.writeWithoutLock("select more")
+		}
+	})
+}
+
+func (c *Editor) MoveDown() {
+	c.lock(func() {
+		c.e.MoveDown()
+		if c.state.mode == ModeSelect {
+			row := c.e.Render().Cursor.Row
+			c.state.selector.end = row
+			c.writeWithoutLock("select more")
+		}
+	})
+}
+
+func (c *Editor) MoveHome() {
+	c.lock(func() {
+		c.e.MoveHome()
+	})
+}
+
+func (c *Editor) MoveEnd() {
+	c.lock(func() {
+		c.e.MoveEnd()
+	})
+}
+
+func (c *Editor) MovePageUp() {
+	c.lock(func() {
+		c.e.MovePageUp()
+		c.maybeUpdateSelectorEndWithoutLock()
+	})
+}
+
+func (c *Editor) MovePageDown() {
+	c.lock(func() {
+		c.e.MovePageDown()
+		c.maybeUpdateSelectorEndWithoutLock()
+	})
+}
+
+func (c *Editor) Undo() {
+	c.lock(func() {
+		c.e.Undo()
+	})
+}
+
+func (c *Editor) Redo() {
+	c.lock(func() {
+		c.e.Redo()
+	})
+}
+
+func (c *Editor) Apply(entry editor.LogEntry) {
+	c.lock(func() {
+		c.e.Apply(entry)
+	})
+}
+
+func (c *Editor) Render() editor.View {
+	return c.e.Render()
+}
+
+func (c *Editor) Status(update func(status editor.Status) editor.Status) {
+	c.lock(func() {
+		c.e.Status(update)
+	})
+}
+func (c *Editor) InsertLine(t2 text.Text) {
+	c.lock(func() {
+		c.e.InsertLine(t2)
+	})
+}
+
+func (c *Editor) DeleteLine(count int) {
+	c.lock(func() {
+		c.e.DeleteLine(count)
+	})
+}
+
+func New(e *insert_editor.Editor, stop func(), defaultOutputFile string) *Editor {
+	c := &Editor{
+		stop:              stop,
+		mu:                sync.Mutex{},
+		e:                 e,
+		defaultOutputFile: defaultOutputFile,
+		state: state{
+			mode:      ModeNormal,
+			command:   "",
+			selector:  nil,
+			clipboard: text.Text{},
+		},
+	}
+	c.writeWithoutLock("")
+	return c
+}
+
+func (c *Editor) lock(f func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	f()
+}
+
+func (c *Editor) writeWithoutLock(message string) {
+	c.e.Status(func(status editor.Status) editor.Status {
+		if status.Other == nil {
+			status.Other = make(map[string]any)
+		}
+		status.Other["command"] = c.state.command
+		status.Other["mode"] = c.state.mode
+		status.Other["selector"] = c.state.selector
+		status.Message = message
+		return status
+	})
+}
+
+func (c *Editor) Action(key string, vals ...any) {
+	c.lock(func() {
+		// TODO - consider if we should move these mouse action into the API
+		switch key {
+		case "mouse_click_left":
+			if c.state.mode == ModeInsert { // click only works for insert mode
+				p := vals[0].(editor.Cursor)
+				relRow, relCol := p.Row, p.Col
+				view := c.e.Render()
+				tlRow, tlCol := view.Window.TlRow, view.Window.TlCol
+				row, col := tlRow+relRow, tlCol+relCol
+				c.e.Goto(row, col)
+			}
+		case "mouse_scroll_up":
+			for i := 0; i < config.Load().SCROLL_SPEED; i++ {
+				c.e.MoveUp()
+			}
+		case "mouse_scroll_down":
+			for i := 0; i < config.Load().SCROLL_SPEED; i++ {
+				c.e.MoveDown()
+			}
+		case "mouse_scroll_left":
+			for i := 0; i < config.Load().SCROLL_SPEED; i++ {
+				c.e.MoveLeft()
+			}
+		case "mouse_scroll_right":
+			for i := 0; i < config.Load().SCROLL_SPEED; i++ {
+				c.e.MoveRight()
+			}
+		case "key_escape":
+			c.keyEscapeWithoutLock()
+		case "key_tabular":
+			if c.state.mode == ModeInsert {
+				for i := 0; i < config.Load().TAB_SIZE; i++ {
+					c.e.Type(' ')
+				}
+			}
+		default:
+			c.writeWithoutLock(fmt.Sprintf("action not supported: %s", key))
+		}
+	})
+}
+
+func (c *Editor) Subscribe(consume func(editor.LogEntry)) uint64 {
+	var key uint64
+	c.lock(func() {
+		key = c.e.Subscribe(consume)
+	})
+	return key
+}
+func (c *Editor) Unsubscribe(key uint64) {
+	c.lock(func() {
+		c.e.Unsubscribe(key)
+	})
+}
+./core/multimode_editor/mode_change.go
+package multimode_editor
+
+import (
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+	"microscope/config"
+	"microscope/core/util/text"
+	"microscope/util/file_util"
+	"time"
+
+	"microscope/util/side_channel"
+)
+
+// all functions resulting in mode change
+
+func (c *Editor) keyEscapeWithoutLock() {
+	c.enterNormalModeWithoutLock()
+	c.writeWithoutLock("")
+}
+
+func (c *Editor) Enter() {
+	c.lock(func() {
+		switch c.state.mode {
+		case ModeNormal:
+			// do nothing
+		case ModeInsert:
+			c.e.Enter()
+		case ModeCommand:
+			c.applyCommandWithoutLock()
+		case ModeSelect:
+			// do nothing
+		default:
+			side_channel.Panic("unknown mode: ", c.state)
+		}
+	})
+}
+
+func (c *Editor) maybeUpdateSelectorEndWithoutLock() {
+	if c.state.mode == ModeSelect {
+		row := c.e.Render().Cursor.Row
+		c.state.selector.end = row
+		c.writeWithoutLock("select more")
+	}
+}
+
+func (c *Editor) Type(ch rune) {
+	c.lock(func() {
+		switch c.state.mode {
+		case ModeNormal:
+			switch ch {
+			case 'i':
+				c.enterInsertModeWithoutLock()
+				c.writeWithoutLock("")
+			case ':', '/':
+				c.enterCommandModeWithoutLock(string(ch))
+				c.writeWithoutLock("")
+			case 'V': // start selecting
+				row := c.e.Render().Cursor.Row
+				c.enterSelectModeWithoutLock(row)
+				c.writeWithoutLock("")
+
+			case 'p': // paste
+				if c.state.clipboard.Len() == 0 {
+					c.writeWithoutLock("clipboard is empty")
+					return
+				}
+				c.e.InsertLine(c.state.clipboard)
+				c.writeWithoutLock("pasted")
+			case 'u':
+				c.e.Undo()
+			case 'r':
+				c.e.Redo()
+
+			case 'b', 'g': // go to beg of file
+				c.e.Goto(0, 0)
+
+			case 'e', 'G': // go to end of file
+				row := c.e.Render().Text.Len() - 1
+				c.e.Goto(row, 0)
+			default:
+			}
+		case ModeInsert:
+			c.e.Type(ch)
+		case ModeCommand:
+			c.state.command += string(ch)
+			c.writeWithoutLock("")
+		case ModeSelect:
+			switch ch {
+			case 'd': // cut
+				beg, end := c.state.selector.Interval()
+				t := c.e.Render().Text
+				c.state.clipboard = text.Slice(t, beg, end+1)
+				// delete
+				c.e.Goto(beg, 0)
+				c.e.DeleteLine(c.state.clipboard.Len())
+
+				c.enterNormalModeWithoutLock()
+				c.writeWithoutLock("cut")
+
+			case 'y': //copy
+				beg, end := c.state.selector.Interval()
+				t := c.e.Render().Text
+				c.state.clipboard = text.Slice(t, beg, end+1)
+				c.enterNormalModeWithoutLock()
+				c.writeWithoutLock("copied")
+
+			case 'b', 'g': // go to beg of file
+				c.e.Goto(0, 0)
+				c.maybeUpdateSelectorEndWithoutLock()
+			case 'e', 'G': // go to end of file
+				row := c.e.Render().Text.Len() - 1
+				c.e.Goto(row, 0)
+				c.maybeUpdateSelectorEndWithoutLock()
+			}
+		default:
+			side_channel.Panic("unknown mode: ", c.state)
+		}
+	})
+}
+
+type command string
+
+const (
+	commandInsert    command = "i"
+	commandQuit      command = "q"
+	commandWriteQuit command = "wq"
+	commandSearch    command = "s"
+	commandRegex     command = "r"
+	commandGoto      command = "g"
+	commandWrite     command = "w"
+	commandUnknown   command = "u"
+)
+
+func parseCommand(cmd string) (command, []string) {
+	if cmd == ":i" || cmd == ":insert" {
+		return commandInsert, nil
+	}
+	if cmd == ":q" || cmd == ":quit" || cmd == ":q!" {
+		return commandQuit, nil
+	}
+	if cmd == ":w" || cmd == ":write" || cmd == ":wq" {
+		return commandWriteQuit, nil
+	}
+
+	for _, prefix := range []string{"/", ":s ", ":search "} {
+		if strings.HasPrefix(cmd, prefix) {
+			cmd = strings.TrimPrefix(cmd, prefix)
+			return commandSearch, strings.Fields(cmd)
+		}
+	}
+
+	for _, prefix := range []string{":regex "} {
+		if strings.HasPrefix(cmd, prefix) {
+			cmd = strings.TrimPrefix(cmd, prefix)
+			return commandRegex, strings.Fields(cmd)
+		}
+	}
+
+	for _, prefix := range []string{":g ", ":goto "} {
+		if strings.HasPrefix(cmd, prefix) {
+			cmd = strings.TrimPrefix(cmd, prefix)
+			return commandGoto, strings.Fields(cmd)
+		}
+	}
+	for _, prefix := range []string{":w ", ":write "} {
+		if strings.HasPrefix(cmd, prefix) {
+			cmd = strings.TrimPrefix(cmd, prefix)
+			return commandWrite, strings.Fields(cmd)
+		}
+	}
+
+	// default to goto
+	for _, prefix := range []string{":"} {
+		if strings.HasPrefix(cmd, prefix) {
+			cmd = strings.TrimPrefix(cmd, prefix)
+			return commandGoto, strings.Fields(cmd)
+		}
+	}
+	return commandUnknown, nil
+}
+
+func (c *Editor) applyCommandWithoutLock() {
+	cmd, args := parseCommand(c.state.command)
+	switch cmd {
+	case commandInsert:
+		c.enterInsertModeWithoutLock()
+		c.writeWithoutLock("")
+		return
+	case commandQuit:
+		c.stop()
+		return
+	case commandWriteQuit:
+		filename := c.defaultOutputFile
+
+		// write file
+		err := file_util.SafeWriteFile(filename, c.e.Render().Text.Iter)
+		if err != nil {
+			c.enterNormalModeWithoutLock()
+			c.writeWithoutLock("error write file " + err.Error())
+			return
+		}
+		c.enterNormalModeWithoutLock()
+		c.writeWithoutLock("file written into " + filename)
+
+		// exit
+		c.stop()
+		return
+	case commandSearch, commandRegex:
+		if len(args) == 0 {
+			c.enterNormalModeWithoutLock()
+			c.writeWithoutLock("empty args")
+			return
+		}
+		pattern := args[0]
+		var match func(line string) bool
+		if cmd == commandRegex {
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				c.enterNormalModeWithoutLock()
+				c.writeWithoutLock(fmt.Sprintf("regexp compile error %s", err.Error()))
+				return
+			}
+			match = re.MatchString
+		} else {
+			match = func(line string) bool {
+				return strings.Contains(line, pattern)
+			}
+		}
+
+		view := c.e.Render()
+		row, t := view.Cursor.Row, view.Text
+		t = text.Slice(t, row+1, t.Len())
+
+		t0 := time.Now()
+		for i, line := range t.Iter {
+			if match(string(line)) {
+				c.e.Goto(row+1+i, 0)
+				c.writeWithoutLock("found substring " + pattern)
+				return
+			}
+			t1 := time.Now()
+			if t1.Sub(t0) > config.Load().MAX_SEACH_TIME {
+				c.e.Goto(row+1+i, 0)
+				c.writeWithoutLock(fmt.Sprintf("search timeout after %d seconds and %d entries", config.Load().MAX_SEACH_TIME/time.Second, i+1))
+				return
+			}
+		}
+		c.e.Goto(t.Len()-1, 0)
+		c.enterNormalModeWithoutLock()
+		c.writeWithoutLock("end of file")
+		return
+	case commandGoto:
+		if len(args) == 0 {
+			c.enterNormalModeWithoutLock()
+			c.writeWithoutLock("empty args")
+			return
+		}
+		lineStr := args[0]
+		lineNum, err := strconv.Atoi(lineStr)
+		if err != nil {
+			c.enterNormalModeWithoutLock()
+			c.writeWithoutLock("invalid line number " + lineStr)
+			return
+		}
+		c.e.Goto(lineNum-1, 0)
+		c.enterNormalModeWithoutLock()
+		c.writeWithoutLock("goto line " + lineStr)
+		return
+	case commandWrite:
+		if len(args) == 0 {
+			c.enterNormalModeWithoutLock()
+			c.writeWithoutLock("empty args")
+			return
+		}
+		filename := args[0]
+		// write file
+		err := file_util.SafeWriteFile(filename, c.e.Render().Text.Iter)
+		if err != nil {
+			c.enterNormalModeWithoutLock()
+			c.writeWithoutLock("error write file " + err.Error())
+			return
+		}
+		c.enterNormalModeWithoutLock()
+		c.writeWithoutLock("file written into " + filename)
+
+	default:
+		c.enterNormalModeWithoutLock()
+		c.writeWithoutLock("unknown command: " + c.state.command)
+	}
+}
+func (c *Editor) Delete() {
+	c.lock(func() {
+		switch c.state.mode {
+		case ModeNormal:
+			c.enterInsertModeWithoutLock()
+			c.writeWithoutLock("")
+			c.e.Delete()
+		case ModeInsert:
+			c.e.Delete()
+		case ModeCommand:
+		// do nothing
+		case ModeSelect:
+			// do nothing
+		default:
+			side_channel.Panic("unknown mode: ", c.state)
+		}
+	})
+}
+
+func (c *Editor) Backspace() {
+	c.lock(func() {
+		switch c.state.mode {
+		case ModeNormal:
+			// do nothing
+		case ModeInsert:
+			c.e.Backspace()
+		case ModeCommand:
+			if len(c.state.command) > 0 {
+				c.state.command = c.state.command[:len(c.state.command)-1]
+				if len(c.state.command) == 0 {
+					c.enterNormalModeWithoutLock()
+					c.writeWithoutLock("")
+				}
+			}
+			c.writeWithoutLock("")
+		case ModeSelect:
+			// do nothing
+		default:
+			side_channel.Panic("unknown mode: ", c.state)
+		}
+	})
+}
+./core/insert_editor/render.go
+package insert_editor
+
+import (
+	"microscope/core/editor"
+)
+
+func (e *Editor) renderWithoutLock() {
+	e.renderCh <- e.makeView()
+}
+
+func (e *Editor) makeView() editor.View {
+	render := func() editor.View {
+		view := editor.View{
+			Cursor: e.cursor,
+			Window: e.window,
+			Status: e.status,
+		}
+
+		view.Text = e.text.Get()
+		return view
+
+	}
+	return render()
+}
+
+func (e *Editor) Render() (view editor.View) {
+	e.lock(func() {
+		view = e.makeView()
+	})
+	return view
+}
+
+func (e *Editor) Update() <-chan editor.View {
+	return e.renderCh
+}
+./core/insert_editor/insert_editor.go
+package insert_editor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"microscope/config"
+	"microscope/core/editor"
+	"microscope/core/util/hist"
+	"microscope/core/util/text"
+	"time"
+
+	"microscope/util/subsciber_pool"
+
+	"microscope/util/buffer"
+)
+
+type Editor struct {
+	renderCh chan editor.View
+
+	mu     sync.Mutex // the fields below are protected by mu
+	text   *hist.Hist[text.Text]
+	cursor editor.Cursor
+	window editor.Window
+	status editor.Status
+	pool   *subsciber_pool.Pool[func(editor.LogEntry)]
+}
+
+func New(
+	height int, width int,
+) (*Editor, error) {
+	e := &Editor{
+		// buffered iterator is necessary  for preventing deadlock
+		renderCh: make(chan editor.View, config.Load().VIEW_CHANNEL_SIZE),
+
+		mu:   sync.Mutex{},
+		text: nil, // awaiting Load
+		cursor: editor.Cursor{
+			Row: 0, Col: 0,
+		},
+		window: editor.Window{
+			TlRow:  0,
+			TlCol:  0,
+			Width:  width,
+			Height: height,
+		},
+		status: editor.Status{
+			Message:    "",
+			Background: "",
+			Other:      nil,
+		},
+		pool: subsciber_pool.New[func(editor.LogEntry)](),
+	}
+	return e, nil
+}
+
+func (e *Editor) lock(f func()) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	f()
+}
+
+func (e *Editor) lockRender(f func()) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	defer e.renderWithoutLock()
+
+	f()
+}
+
+func (e *Editor) setMessageWithoutLock(format string, a ...any) {
+	e.status.Message = fmt.Sprintf(format, a...)
+}
+
+func (e *Editor) writeLogWithoutLock(entry editor.LogEntry) {
+	go func() {
+		for _, consume := range e.pool.Iter {
+			consume(entry)
+		}
+	}()
+}
+
+func (e *Editor) Subscribe(consume func(editor.LogEntry)) uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.pool.Subscribe(consume)
+}
+
+func (e *Editor) Unsubscribe(key uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pool.Unsubscribe(key)
+}
+
+func (e *Editor) Resize(height int, width int) {
+	e.lockRender(func() {
+		if e.window.Height == height && e.window.Width == width {
+			return
+		}
+		e.window.Height, e.window.Width = height, width
+		e.moveRelativeAndFixWithoutLock(0, 0)
+		e.setMessageWithoutLock("resize to %dx%d", height, width)
+	})
+}
+
+func (e *Editor) Status(update func(status editor.Status) editor.Status) {
+	e.lockRender(func() {
+		e.status = update(e.status)
+	})
+}
+
+func (e *Editor) load(ctx context.Context, reader buffer.Reader, loadDone func()) {
+	t0 := time.Now()
+	defer loadDone()
+	defer e.lockRender(func() {
+		totalTime := time.Since(t0)
+		e.status.Background = ""
+		select {
+		case <-ctx.Done():
+			e.status.Message = fmt.Sprintf(
+				"loading was cancelled after %d seconds",
+				int(totalTime.Seconds()),
+			)
+		default:
+			e.status.Message = fmt.Sprintf(
+				"loaded for %d seconds",
+				int(totalTime.Seconds()),
+			)
+		}
+	})
+	if reader == nil {
+		return // nothing to load
+	}
+
+	loader := newLoader(reader.Len())
+
+	lastPoll := time.Now()
+	for offset := range text.IndexFile(reader) {
+		now := time.Now()
+		if now.Sub(lastPoll) >= config.Load().LOAD_ESCAPE_INTERVAL {
+			lastPoll = now
+			if !pollCtx(ctx) {
+				return
+			}
+		}
+		e.lock(func() {
+			e.text.Update(func(t text.Text) text.Text {
+				return t.Append(text.MakeLineFromOffset(offset))
+			})
+			if loader.set(offset) {
+				e.status.Background = fmt.Sprintf(
+					"loading %d/%d (%d%%)",
+					loader.loadedSize, loader.totalSize, loader.lastRenderPercentage,
+				)
+				e.renderWithoutLock()
+			}
+		})
+	}
+
+}
+
+func (e *Editor) Load(ctx context.Context, reader buffer.Reader) (context.Context, error) {
+	loadCtx, loadDone := context.WithCancel(context.Background())
+	var err error = nil
+	e.lockRender(func() {
+		if e.text != nil {
+			loadDone()
+			err = errors.New("load twice")
+			return
+		}
+		e.text = hist.New(text.New(reader))
+		// load file asynchronously
+		go e.load(ctx, reader, loadDone)
+		e.status.Background = "loading started"
+	})
+
+	return loadCtx, err
+}
+
+func (e *Editor) Action(key string, vals ...any) {
+	// nothing
+}
+./core/insert_editor/edit.go
+package insert_editor
+
+import (
+	"slices"
+	"microscope/core/editor"
+	"microscope/core/util/text"
+
+	"microscope/util/side_channel"
+)
+
+func (e *Editor) Type(ch rune) {
+	e.lockRender(func() {
+		e.writeLogWithoutLock(editor.LogEntry{
+			Command: editor.CommandType,
+			Rune:    ch,
+			Row:     uint64(e.cursor.Row),
+			Col:     uint64(e.cursor.Col),
+		})
+
+		updateText := func(t text.Text) text.Text {
+			row, col := e.cursor.Row, e.cursor.Col
+			// NOTE - handle empty file
+			if t.Len() == 0 {
+				t = t.Ins(0, []rune{ch})
+				return t
+			}
+			// t.Get(row) always well-defined
+			line := slices.Clone(t.Get(row))
+			line = insertToSlice(line, col, ch)
+			t = t.Set(row, line)
+			return t
+		}
+
+		e.text.Update(updateText)
+		e.moveRelativeAndFixWithoutLock(0, 1) // move right
+		e.setMessageWithoutLock("type '%c'", ch)
+	})
+}
+
+func (e *Editor) Backspace() {
+	e.lockRender(func() {
+		e.writeLogWithoutLock(editor.LogEntry{
+			Command: editor.CommandBackspace,
+			Row:     uint64(e.cursor.Row),
+			Col:     uint64(e.cursor.Col),
+		})
+
+		moveRow, moveCol := 0, 0
+		updateText := func(t text.Text) text.Text {
+			row, col := e.cursor.Row, e.cursor.Col
+			// NOTE - handle empty file
+			if t.Len() == 0 {
+				return t
+			}
+			switch {
+			case col == 0 && row == 0:
+			// first line do nothing
+			case col == 0 && row != 0:
+				// merge 2 lines
+				line1 := t.Get(row - 1)
+				line2 := t.Get(row)
+
+				t = t.Set(row-1, concatSlices(line1, line2)).Del(row)
+				moveRow, moveCol = -1, len(line1) // move up and to the end of last line
+			case col != 0:
+				// t.Get(row) always well-defined
+				line := slices.Clone(t.Get(row))
+				line = deleteFromSlice(line, col-1)
+				t = t.Set(row, line)
+				moveRow, moveCol = 0, -1 // move left
+			default:
+				side_channel.Panic("unreachable")
+			}
+			return t
+		}
+		e.text.Update(updateText)
+		e.moveRelativeAndFixWithoutLock(moveRow, moveCol)
+		e.setMessageWithoutLock("backspace")
+	})
+}
+
+func (e *Editor) Delete() {
+	e.lockRender(func() {
+		e.writeLogWithoutLock(editor.LogEntry{
+			Command: editor.CommandDelete,
+			Row:     uint64(e.cursor.Row),
+			Col:     uint64(e.cursor.Col),
+		})
+
+		updateText := func(t text.Text) text.Text {
+			row, col := e.cursor.Row, e.cursor.Col
+			// NOTE - handle empty file
+			if t.Len() == 0 {
+				return t
+			}
+			// t.Get(row) always well-defined
+			line1 := t.Get(row)
+			switch {
+			case col == len(line1) && row == t.Len()-1:
+			// last line, do nothing
+			case col == len(line1) && row < t.Len()-1:
+				// merge 2 lines
+				line2 := t.Get(row + 1)
+				t = t.Set(row, concatSlices(line1, line2)).Del(row + 1)
+			case col != len(line1):
+				line := slices.Clone(line1)
+				line = deleteFromSlice(line, col)
+				t = t.Set(row, line)
+			default:
+				side_channel.Panic("unreachable")
+			}
+			return t
+		}
+		e.text.Update(updateText)
+		e.setMessageWithoutLock("delete")
+	})
+}
+
+func (e *Editor) Enter() {
+	e.lockRender(func() {
+		e.writeLogWithoutLock(editor.LogEntry{
+			Command: editor.CommandEnter,
+			Row:     uint64(e.cursor.Row),
+			Col:     uint64(e.cursor.Col),
+		})
+
+		updateText := func(t text.Text) text.Text {
+			row, col := e.cursor.Row, e.cursor.Col
+			// NOTE - handle empty file
+			if t.Len() == 0 {
+				t = t.Ins(0, nil)
+				return t
+			}
+			// t.Get(row) always well-defined
+			line := t.Get(row)
+			switch {
+			case col == len(line):
+				// add new line
+				t = t.Ins(row+1, nil)
+				return t
+			case col < len(line):
+				// split a line
+				line1 := slices.Clone(line[:col])
+				line2 := slices.Clone(line[col:])
+				t = t.Set(row, line1)
+				t = t.Ins(row+1, line2)
+				return t
+			default:
+				side_channel.Panic("unreachable")
+				return t
+			}
+		}
+		e.text.Update(updateText)
+		e.moveRelativeAndFixWithoutLock(1, 0)             // move down
+		e.moveRelativeAndFixWithoutLock(0, -e.cursor.Col) // move home
+		e.setMessageWithoutLock("enter")
+	})
+}
+
+func (e *Editor) Undo() {
+	e.lockRender(func() {
+		e.writeLogWithoutLock(editor.LogEntry{
+			Command: editor.CommandUndo,
+		})
+		e.text.Undo()
+		e.moveRelativeAndFixWithoutLock(0, 0)
+		e.setMessageWithoutLock("undo")
+	})
+}
+
+func (e *Editor) Redo() {
+	e.lockRender(func() {
+		e.writeLogWithoutLock(editor.LogEntry{
+			Command: editor.CommandRedo,
+		})
+		e.text.Redo()
+		e.moveRelativeAndFixWithoutLock(0, 0)
+		e.setMessageWithoutLock("redo")
+	})
+}
+
+func (e *Editor) Apply(entry editor.LogEntry) {
+	switch entry.Command {
+	case editor.CommandEnter:
+		e.Goto(int(entry.Row), int(entry.Col))
+		e.Enter()
+	case editor.CommandBackspace:
+		e.Goto(int(entry.Row), int(entry.Col))
+		e.Backspace()
+	case editor.CommandDelete:
+		e.Goto(int(entry.Row), int(entry.Col))
+		e.Delete()
+	case editor.CommandType:
+		e.Goto(int(entry.Row), int(entry.Col))
+		e.Type(entry.Rune)
+	case editor.CommandUndo:
+		e.Undo()
+	case editor.CommandRedo:
+		e.Redo()
+	case editor.CommandInsertLine:
+		e.Goto(int(entry.Row), 0)
+		e.InsertLine(text.MakeTextFromLine(entry.Text))
+	case editor.CommandDeleteLine:
+		e.Goto(int(entry.Row), 0)
+		e.DeleteLine(int(entry.Count))
+	default:
+		side_channel.Panic("command not found")
+	}
+}
+
+func (e *Editor) InsertLine(t2 text.Text) {
+	e.lockRender(func() {
+		e.writeLogWithoutLock(editor.LogEntry{
+			Command: editor.CommandInsertLine,
+			Row:     uint64(e.cursor.Row),
+			Text:    t2.Repr(),
+		})
+		row := e.cursor.Row
+		update := func(t text.Text) text.Text {
+			return text.Merge(
+				text.Slice(t, 0, row),
+				t2,
+				text.Slice(t, row, t.Len()),
+			)
+		}
+		e.text.Update(update)
+		e.moveRelativeAndFixWithoutLock(t2.Len(), 0)
+		e.setMessageWithoutLock("insert lines")
+	})
+}
+
+func (e *Editor) DeleteLine(count int) {
+	e.lockRender(func() {
+		row := e.cursor.Row
+		e.writeLogWithoutLock(editor.LogEntry{
+			Command: editor.CommandDeleteLine,
+			Row:     uint64(row),
+			Count:   uint64(count),
+		})
+		update := func(t text.Text) text.Text {
+			return text.Merge(
+				text.Slice(t, 0, row),
+				text.Slice(t, row+count, t.Len()),
+			)
+		}
+		e.text.Update(update)
+		e.setMessageWithoutLock("delete lines")
+	})
+}
+./core/insert_editor/util.go
+package insert_editor
+
+import (
+	"context"
+	"iter"
+	"microscope/config"
+	"time"
+
+	"microscope/util/side_channel"
+)
+
+func insertToSlice[T any](l []T, i int, v T) []T {
+	if i < 0 || i > len(l) {
+		side_channel.Panic("invalid index", i, l)
+		return nil
+	}
+	if i == len(l) {
+		return append(l, v)
+	}
+	l = append(l, v)
+	copy(l[i+1:], l[i:])
+	l[i] = v
+	return l
+}
+
+func deleteFromSlice[T any](l []T, i int) []T {
+	if i < 0 || i >= len(l) {
+		side_channel.Panic("invalid index", i, l)
+		return nil
+	}
+	copy(l[i:], l[i+1:])
+	return l[:len(l)-1]
+}
+func concatSlices[T any](ls ...[]T) []T {
+	c := make([]T, 0)
+	for _, l := range ls {
+		c = append(c, l...)
+	}
+	return c
+}
+
+func toIndexedIterator[T any](i iter.Seq[T]) iter.Seq2[int, T] {
+	return func(yield func(int, T) bool) {
+		index := 0
+		for v := range i {
+			if !yield(index, v) {
+				return
+			}
+			index++
+		}
+	}
+}
+
+func pollCtx(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+		return true
+	}
+}
+
+func newLoader(totalSize int) *loader {
+	return &loader{
+		totalSize:            totalSize,
+		loadedSize:           0,
+		lastRenderPercentage: -1,
+		lastRenderTime:       time.Time{},
+	}
+}
+
+type loader struct {
+	totalSize            int
+	loadedSize           int
+	lastRenderPercentage int
+	lastRenderTime       time.Time
+}
+
+func (l *loader) set(loadedSize int) bool {
+	l.loadedSize = max(loadedSize, l.loadedSize)
+	percentage := int(100 * float64(l.loadedSize) / float64(l.totalSize))
+	t := time.Now()
+	if percentage > l.lastRenderPercentage || t.Sub(l.lastRenderTime) >= config.Load().LOADING_PROGRESS_INTERVAL {
+		l.lastRenderPercentage = percentage
+		l.lastRenderTime = t
+		return true
+	}
+	return false
+}
+./core/insert_editor/move.go
+package insert_editor
+
+import (
+	"microscope/core/editor"
+	"microscope/core/util/text"
+)
+
+func (e *Editor) gotoAndFixWithoutLock(row int, col int) {
+	finalizeCursorAndWindow := func(curRow int, curCol int, tlRow int, tlCol int, width int, height int, t text.Text) (newCurRow int, newCurCol int, newTlRow int, newTlCol int) {
+		// fix cursor according text
+		if t.Len() == 0 {
+			curRow, curCol = 0, 0
+		} else {
+			if curRow < 0 {
+				curRow = 0
+			}
+			if curRow >= t.Len() {
+				curRow = t.Len() - 1
+			}
+			if curCol < 0 {
+				curCol = 0
+			}
+			line := t.Get(curRow)
+			if curCol > len(line) {
+				curCol = len(line) // col can be 1 character outside of text
+			}
+		}
+		// fix window according to cursor
+		if curRow < tlRow {
+			tlRow = curRow
+		}
+		if curRow >= tlRow+height {
+			tlRow = curRow - height + 1
+		}
+		if curCol < tlCol {
+			tlCol = curCol
+		}
+		if curCol >= tlCol+width {
+			tlCol = curCol - width + 1
+		}
+
+		return curRow, curCol, tlRow, tlCol
+	}
+
+	t := e.text.Get()
+	tlRow, tlCol := e.window.TlRow, e.window.TlCol
+	width, height := e.window.Width, e.window.Height
+
+	row, col, tlRow, tlCol = finalizeCursorAndWindow(row, col, tlRow, tlCol, width, height, t)
+
+	// set
+	e.cursor = editor.Cursor{
+		Row: row,
+		Col: col,
+	}
+	e.window = editor.Window{
+		TlRow:  tlRow,
+		TlCol:  tlCol,
+		Width:  width,
+		Height: height,
+	}
+}
+
+func (e *Editor) moveRelativeAndFixWithoutLock(moveRow int, moveCol int) {
+	e.gotoAndFixWithoutLock(e.cursor.Row+moveRow, e.cursor.Col+moveCol)
+}
+
+func (e *Editor) MoveLeft() {
+	e.lockRender(func() {
+		e.moveRelativeAndFixWithoutLock(0, -1)
+		e.setMessageWithoutLock("move left")
+	})
+}
+func (e *Editor) MoveRight() {
+	e.lockRender(func() {
+		e.moveRelativeAndFixWithoutLock(0, 1)
+		e.setMessageWithoutLock("move right")
+	})
+}
+func (e *Editor) MoveUp() {
+	e.lockRender(func() {
+		e.moveRelativeAndFixWithoutLock(-1, 0)
+		e.setMessageWithoutLock("move up")
+	})
+}
+func (e *Editor) MoveDown() {
+	e.lockRender(func() {
+		e.moveRelativeAndFixWithoutLock(1, 0)
+		e.setMessageWithoutLock("move down")
+	})
+}
+func (e *Editor) MoveHome() {
+	e.lockRender(func() {
+		e.moveRelativeAndFixWithoutLock(0, -e.cursor.Col)
+		e.setMessageWithoutLock("move home")
+	})
+}
+func (e *Editor) MoveEnd() {
+	e.lockRender(func() {
+		t := e.text.Get()
+		if e.cursor.Row < t.Len() {
+			line := t.Get(e.cursor.Row)
+			e.moveRelativeAndFixWithoutLock(0, len(line)-e.cursor.Col)
+		}
+		e.setMessageWithoutLock("move end")
+	})
+}
+func (e *Editor) MovePageUp() {
+	e.lockRender(func() {
+		e.moveRelativeAndFixWithoutLock(-e.window.Height, 0)
+		e.setMessageWithoutLock("move page up")
+	})
+}
+func (e *Editor) MovePageDown() {
+	e.lockRender(func() {
+		e.moveRelativeAndFixWithoutLock(e.window.Height, 0)
+		e.setMessageWithoutLock("move page down")
+	})
+}
+
+func (e *Editor) Goto(row int, col int) {
+	e.lockRender(func() {
+		e.gotoAndFixWithoutLock(row, col)
+		e.setMessageWithoutLock("goto (%d, %d)", row+1, col+1)
+	})
+}
+./core/util/hist/hist.go
+package hist
+
+import (
+	"microscope/config"
+)
+
+func New[T any](t T) *Hist[T] {
+	return &Hist[T]{
+		latest: 0,
+		stack:  []T{t},
+	}
+}
+
+type Hist[T any] struct {
+	latest uint64 // latest version
+	stack  []T    // all versions
+}
+
+func (h *Hist[T]) Update(modifier func(T) T) {
+	next := modifier(h.stack[h.latest])
+	h.stack = append(h.stack[:h.latest+1], next)
+	h.latest++
+	if len(h.stack) > config.Load().MAXSIZE_HISTORY_STACK {
+		h.stack = h.stack[1:]
+		h.latest--
+	}
+}
+
+func (h *Hist[T]) Get() T {
+	return h.stack[h.latest]
+}
+func (h *Hist[T]) Undo() {
+	if h.latest > 0 {
+		h.latest--
+	}
+}
+
+func (h *Hist[T]) Redo() {
+	if int(h.latest) < len(h.stack)-1 {
+		h.latest++
+	}
+}
+./core/util/text/line.go
+package text
+
+import "microscope/util/buffer"
+
+const delim byte = '\n'
+
+// Line - if offset >= 0, this is a file else this is a []byte buffer
+type Line struct {
+	offset int64   // 8 bytes
+	data   *[]byte // 8 bytes on 64-bit system
+}
+
+func MakeLineFromData(data []byte) Line {
+	return Line{
+		offset: -1,
+		data:   &data,
+	}
+}
+
+func MakeLineFromOffset(offset int) Line {
+	return Line{
+		offset: int64(offset),
+		data:   nil,
+	}
+}
+
+func (l Line) Offset() int64 {
+	return l.offset
+}
+
+func (l Line) Repr(reader buffer.Reader) []byte {
+	if l.offset < 0 {
+		// in-memory
+		return *l.data
+	} else {
+		// from file
+		buf := make([]byte, 0)
+		for i := int(l.offset); i < reader.Len(); i++ {
+			b := reader.At(i)
+			if b == delim {
+				break
+			}
+			buf = append(buf, b)
+		}
+		return buf
+	}
+}
+./core/util/text/util.go
+package text
+
+import (
+	"microscope/util/persistent/seq"
+)
+
+func MakeTextFromLine(lines [][]rune) Text {
+	s := seq.Empty[Line]()
+	for _, line := range lines {
+		s = s.Ins(s.Len(), MakeLineFromData(runesToBytes(line)))
+	}
+	return Text{
+		reader: nil,
+		lines:  s,
+	}
+}
+
+func runesToBytes(rs []rune) (bs []byte) {
+	return []byte(string(rs))
+}
+
+func bytesToRunes(bs []byte) (rs []rune) {
+	return []rune(string(bs))
+}
+./core/util/text/text.go
+package text
+
+import (
+	"microscope/util/side_channel"
+
+	"microscope/util/buffer"
+	"microscope/util/persistent/seq"
+)
+
+func New(reader buffer.Reader) Text {
+	return Text{
+		reader: reader,
+		lines:  seq.Empty[Line](),
+	}
+}
+
+type Text struct {
+	reader buffer.Reader
+	lines  seq.Seq[Line]
+}
+
+func (t Text) Get(i int) []rune {
+	return bytesToRunes(t.lines.Get(i).Repr(t.reader))
+}
+
+func (t Text) Set(i int, val []rune) Text {
+	return Text{
+		reader: t.reader,
+		lines:  t.lines.Set(i, MakeLineFromData(runesToBytes(val))),
+	}
+}
+
+func (t Text) Ins(i int, val []rune) Text {
+	return Text{
+		reader: t.reader,
+		lines:  t.lines.Ins(i, MakeLineFromData(runesToBytes(val))),
+	}
+}
+
+func (t Text) Append(line Line) Text {
+	return Text{
+		reader: t.reader,
+		lines:  t.lines.Ins(t.lines.Len(), line),
+	}
+}
+
+func (t Text) Del(i int) Text {
+	return Text{
+		reader: t.reader,
+		lines:  t.lines.Del(i),
+	}
+}
+
+func (t Text) Iter(f func(i int, val []rune) bool) {
+	t.lines.Iter(func(i int, l Line) bool {
+		return f(i, bytesToRunes(l.Repr(t.reader)))
+	})
+}
+
+func (t Text) Len() int {
+	return t.lines.Len()
+}
+
+func (t Text) Repr() [][]rune {
+	text := make([][]rune, 0, t.lines.Len())
+	for _, l := range t.lines.Iter {
+		text = append(text, bytesToRunes(l.Repr(t.reader)))
+	}
+	return text
+}
+
+func Slice(t Text, beg int, end int) Text {
+	return Text{
+		reader: t.reader,
+		lines:  t.lines.Slice(beg, end),
+	}
+}
+
+func Merge(ts ...Text) Text {
+	if len(ts) == 0 {
+		side_channel.Panic("cannot merge empty text")
+		return Text{}
+	}
+	t := ts[0]
+	for i := 1; i < len(ts); i++ {
+		t1 := ts[i]
+		reader := t.reader
+		if reader == nil {
+			reader = t1.reader
+		} else {
+			if t1.reader != nil && t1.reader != reader {
+				side_channel.Panic("cannot merge text with different reader")
+				return Text{}
+			}
+		}
+		t = Text{
+			reader: reader,
+			lines:  seq.Merge(t.lines, t1.lines),
+		}
+	}
+	return t
+}
+./core/util/text/load.go
+package text
+
+import (
+	"iter"
+	"microscope/util/buffer"
+)
+
+func IndexFile(reader buffer.Reader) iter.Seq[int] {
+	return func(yield func(offset int) bool) {
+		offset := 0
+		for i := 0; i < reader.Len(); i++ {
+			b := reader.At(i)
+			if b == delim {
+				if !yield(offset) {
+					return
+				}
+				offset = i + 1
+			}
+		}
+		if offset < reader.Len() {
+			yield(offset)
+		}
+	}
+}
+./core/log_writer/util.go
+package log_writer
+
+import (
+	"encoding/binary"
+	"errors"
+	"io"
+
+	"microscope/util/side_channel"
+)
+
+func uint64ToBytes(x uint64) []byte {
+	b := make([]byte, 8) // 8 buffer
+	binary.LittleEndian.PutUint64(b, x)
+	return b
+}
+
+func bytesToUint64(b []byte) uint64 {
+	if len(b) != 8 {
+		side_channel.Panic("invalid length")
+		return 0
+	}
+	return binary.LittleEndian.Uint64(b)
+}
+
+func runeToBytes(x rune) []byte {
+	b := make([]byte, 4)                        // 4 buffer
+	binary.LittleEndian.PutUint32(b, uint32(x)) // reinterpret rune int32 as uint32
+	return b
+}
+
+func bytesToRune(b []byte) rune {
+	return rune(binary.LittleEndian.Uint32(b))
+}
+
+func lengthPrefixWrite(w io.Writer, b []byte) error {
+	lb := uint64ToBytes(uint64(len(b)))
+	buf := append(lb, b...)
+
+	_, err := w.Write(buf)
+	return err
+}
+
+func lengthPrefixRead(r io.Reader) ([]byte, error) {
+	lb := make([]byte, 8)
+	_, err := r.Read(lb)
+	if err != nil {
+		return nil, err
+	}
+	l := bytesToUint64(lb)
+
+	b := make([]byte, l)
+	_, err = r.Read(b)
+	if err != nil {
+		return nil, errors.New("incomplete read")
+	}
+	return b, nil
+}
+./core/log_writer/serializer.go
+package log_writer
+
+import (
+	"encoding/json"
+	"errors"
+	"microscope/config"
+	"microscope/core/editor"
+
+	"microscope/util/side_channel"
+)
+
+type Serializer interface {
+	Marshal(editor.LogEntry) ([]byte, error)
+	Unmarshal([]byte) (editor.LogEntry, error)
+	Version() uint64
+}
+
+func GetSerializer(version uint64) (Serializer, error) {
+	switch version {
+	case config.HUMAN_READABLE_SERIALIZER:
+		return humanReadableSerializer{}, nil
+	case config.BINARY_SERIALIZER:
+		side_channel.Panic("binary serializer is not fully implemented yet")
+		return binarySerializer{}, nil
+	default:
+		return nil, errors.New("serializer not found")
+	}
+}
+
+type humanReadableSerializer struct{}
+
+func (humanReadableSerializer) Marshal(e editor.LogEntry) ([]byte, error) {
+	b, err := json.Marshal(e)
+	// padding for human readability
+	b1 := []byte{' '}
+	b1 = append(b1, b...)
+	b1 = append(b1, '\n')
+
+	return b1, err
+}
+
+func (humanReadableSerializer) Unmarshal(b []byte) (e editor.LogEntry, err error) {
+	err = json.Unmarshal(b, &e)
+	return e, err
+}
+
+func (humanReadableSerializer) Version() uint64 {
+	return config.HUMAN_READABLE_SERIALIZER
+}
+
+type binarySerializer struct{}
+
+var commandList = []editor.Command{
+	editor.CommandSetVersion,
+	editor.CommandType,
+	editor.CommandEnter,
+	editor.CommandBackspace,
+	editor.CommandDelete,
+	editor.CommandUndo,
+	editor.CommandRedo,
+}
+var commandToByteMap map[editor.Command]byte = nil
+
+func commandToByte(c editor.Command) byte {
+	if commandToByteMap == nil {
+		commandToByteMap = make(map[editor.Command]byte)
+		for i, cmd := range commandList {
+			commandToByteMap[cmd] = byte(i)
+		}
+	}
+	return commandToByteMap[c]
+}
+
+func byteToCommand(b byte) editor.Command {
+	return commandList[b]
+}
+
+func consume(buffer []byte, n int) ([]byte, []byte) {
+	if len(buffer) < n {
+		return buffer, make([]byte, n)
+	}
+	return buffer[n:], buffer[:n]
+}
+
+func (binarySerializer) Marshal(e editor.LogEntry) ([]byte, error) {
+	var buffer []byte
+	buffer = append(buffer, commandToByte(e.Command))
+	switch e.Command {
+	case editor.CommandSetVersion:
+		buffer = append(buffer, uint64ToBytes(e.Version)...)
+		return buffer, nil
+	case editor.CommandType:
+		buffer = append(buffer, uint64ToBytes(e.Row)...)
+		buffer = append(buffer, uint64ToBytes(e.Col)...)
+		buffer = append(buffer, runeToBytes(e.Rune)...)
+		return buffer, nil
+	case editor.CommandEnter, editor.CommandBackspace, editor.CommandDelete:
+		buffer = append(buffer, uint64ToBytes(e.Row)...)
+		buffer = append(buffer, uint64ToBytes(e.Col)...)
+		return buffer, nil
+	case editor.CommandUndo, editor.CommandRedo:
+		return buffer, nil
+	default:
+		return nil, errors.New("command not found")
+	}
+}
+
+func (binarySerializer) Unmarshal(buffer []byte) (e editor.LogEntry, err error) {
+	buffer, b := consume(buffer, 1)
+	e.Command = byteToCommand(b[0])
+	switch e.Command {
+	case editor.CommandSetVersion:
+		buffer, b = consume(buffer, 8)
+		e.Version = bytesToUint64(b)
+		return e, nil
+	case editor.CommandType:
+		buffer, b = consume(buffer, 8)
+		e.Row = bytesToUint64(b)
+		buffer, b = consume(buffer, 8)
+		e.Col = bytesToUint64(b)
+		buffer, b = consume(buffer, 4)
+		e.Rune = bytesToRune(b)
+		return e, nil
+	case editor.CommandEnter, editor.CommandBackspace, editor.CommandDelete:
+		buffer, b = consume(buffer, 8)
+		e.Row = bytesToUint64(b)
+		buffer, b = consume(buffer, 8)
+		e.Col = bytesToUint64(b)
+		return e, nil
+	case editor.CommandUndo, editor.CommandRedo:
+		return e, nil
+	}
+	return e, errors.New("parse error")
+}
+
+func (binarySerializer) Version() uint64 {
+	return config.BINARY_SERIALIZER
+}
+./core/log_writer/writer.go
+package log_writer
+
+import (
+	"io"
+	"sync"
+	"microscope/config"
+	"microscope/core/editor"
+)
+
+func New(writer io.Writer) (*Writer, error) {
+	// use initial serializer
+	version := config.Load().INITIAL_SERIALIZER_VERSION
+	s, err := GetSerializer(version)
+	if err != nil {
+		return nil, err
+	}
+	w := &Writer{
+		mu:      sync.Mutex{},
+		writer:  writer,
+		marshal: s.Marshal,
+	}
+
+	// write set_version using INITIAL_SERIALIZER_VERSION
+	// tell reader to use SERIALIZER_VERSION
+	err = w.Write(editor.LogEntry{
+		Command: editor.CommandSetVersion,
+		Version: config.Load().SERIALIZER_VERSION,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	s1, err := GetSerializer(config.Load().SERIALIZER_VERSION)
+	if err != nil {
+		return nil, err
+	}
+	w.marshal = s1.Marshal
+	return w, nil
+}
+
+type Writer struct {
+	mu      sync.Mutex
+	writer  io.Writer
+	marshal func(editor.LogEntry) ([]byte, error)
+}
+
+func (w *Writer) Write(e editor.LogEntry) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	b, err := w.marshal(e)
+	if err != nil {
+		return err
+	}
+
+	return lengthPrefixWrite(w.writer, b)
+}
+./core/log_writer/reader.go
+package log_writer
+
+import (
+	"io"
+	"os"
+	"microscope/config"
+	"microscope/core/editor"
+)
+
+func Read(filename string, apply func(e editor.LogEntry) bool) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	s, err := GetSerializer(config.Load().INITIAL_SERIALIZER_VERSION)
+	if err != nil {
+		return err
+	}
+
+	for {
+		b, readErr := lengthPrefixRead(f)
+
+		if readErr != nil {
+			// if readErr is EOF - discard b
+			return readErr
+		}
+
+		s1, ok, processErr := func(s Serializer, b []byte) (Serializer, bool, error) {
+			e, err := s.Unmarshal(b)
+			if err != nil {
+				return nil, true, err
+			}
+			switch e.Command {
+			case editor.CommandSetVersion:
+				s1, err := GetSerializer(e.Version)
+				return s1, true, err
+			default:
+				return s, apply(e), nil
+			}
+		}(s, b)
+
+		if processErr != nil {
+			return processErr
+		}
+		if !ok || readErr == io.EOF {
+			return nil
+		}
+
+		s = s1
+	}
+}
+./core/editor/log.go
+package editor
+
+type Command string
+
+const (
+	CommandSetVersion Command = "set_version" // set version of serializer
+	CommandType       Command = "type"
+	CommandEnter      Command = "enter"
+	CommandBackspace  Command = "backspace"
+	CommandDelete     Command = "delete"
+	CommandUndo       Command = "undo"
+	CommandRedo       Command = "redo"
+	CommandInsertLine Command = "insert_line"
+	CommandDeleteLine Command = "delete_line"
+)
+
+type LogEntry struct {
+	Command Command  `json:"command"`
+	Version uint64   `json:"version,omitempty"`
+	Row     uint64   `json:"row,omitempty"`
+	Col     uint64   `json:"col,omitempty"`
+	Rune    rune     `json:"rune,omitempty"`
+	Text    [][]rune `json:"text,omitempty"`
+	Count   uint64   `json:"count,omitempty"`
+	Beg     uint64   `json:"beg,omitempty"`
+	End     uint64   `json:"end,omitempty"`
+}
+./core/editor/editor.go
+package editor
+
+import (
+	"context"
+	"microscope/core/util/text"
+
+	"microscope/util/buffer"
+)
+
+type Cursor struct {
+	Row int
+	Col int
+}
+
+type Status struct {
+	Message    string
+	Background string
+	Other      map[string]any // arbitrary view
+}
+
+type Window struct {
+	TlRow  int
+	TlCol  int
+	Width  int
+	Height int
+}
+
+type View struct {
+	Text   text.Text
+	Cursor Cursor
+	Window Window
+	Status Status
+}
+
+// window is a part of view since moving the cursor changes window's position
+
+type Move interface {
+	MoveLeft()
+	MoveRight()
+	MoveUp()
+	MoveDown()
+	MoveHome()
+	MoveEnd()
+	MovePageUp()
+	MovePageDown()
+	Goto(row int, col int)
+}
+
+type Edit interface {
+	Type(ch rune)
+	Backspace()
+	Delete()
+	Enter()
+	Undo()
+	Redo()
+
+	InsertLine(t2 text.Text)
+	DeleteLine(count int)
+
+	Apply(entry LogEntry)
+}
+
+type Render interface {
+	Render() View
+	Update() <-chan View
+}
+
+type Editor interface {
+	Load(ctx context.Context, reader buffer.Reader) (context.Context, error)
+	Resize(height int, width int)
+	Status(update func(status Status) Status)
+	Action(key string, vals ...any) // arbitrary action
+	Subscribe(func(LogEntry)) uint64
+	Unsubscribe(key uint64)
+	Render
+	Edit
+	Move
+}
+./util/persistent/seq/seq_extra.go
+package seq
+
+func (s Seq[T]) Front() T {
+	return s.Get(0)
+}
+
+func (s Seq[T]) Back() T {
+	return s.Get(s.Len() - 1)
+}
+
+func (s Seq[T]) PushFront(vals ...T) Seq[T] {
+	for i := len(vals) - 1; i >= 0; i-- {
+		s = s.Ins(0, vals[i])
+	}
+	return s
+}
+func (s Seq[T]) PushBack(vals ...T) Seq[T] {
+	for i := 0; i < len(vals); i++ {
+		s = s.Ins(s.Len(), vals[i])
+	}
+	return s
+}
+
+func (s Seq[T]) PopFront() Seq[T] {
+	return s.Del(0)
+}
+
+func (s Seq[T]) PopBack() Seq[T] {
+	return s.Del(s.Len() - 1)
+}
+
+func (s Seq[T]) IndexOf(pred func(T) bool) int {
+	index := -1
+	for i, val := range s.Iter {
+		if pred(val) {
+			index = i
+			break
+		}
+	}
+	return index
+}
+func (s Seq[T]) Contains(pred func(T) bool) bool {
+	return s.IndexOf(pred) >= 0
+}
+
+func (s Seq[T]) Slice(beg int, end int) Seq[T] {
+	if beg > end {
+		panic("slice out of range")
+	}
+	s, _ = s.Split(end)
+	_, s = s.Split(beg)
+	return s
+}
+
+func Merge[T any](ss ...Seq[T]) Seq[T] {
+	if len(ss) == 0 {
+		return Empty[T]()
+	}
+	s := ss[0]
+	for i := 1; i < len(ss); i++ {
+		s = s.Merge(ss[i])
+	}
+	return s
+}
+
+// monad
+
+func Fmap[T any, T1 any](xs Seq[T], f func(T) T1) Seq[T1] {
+	return Seq[T1]{node: _map(xs.node, f)}
+}
+
+func Ap[T any, T1 any](fs Seq[func(T) T1], xs Seq[T]) Seq[T1] {
+	return Seq[T1]{node: _seq(fs.node, xs.node)}
+}
+
+func Bind[T any, T1 any](s Seq[T], f func(T) Seq[T1]) Seq[T1] {
+	return Seq[T1]{node: _bind(s.node, func(x T) *node[T1] {
+		return f(x).node
+	})}
+}
+./util/persistent/seq/seq.go
+package seq
+
+func Empty[T any]() Seq[T] {
+	return Seq[T]{node: nil}
+}
+
+type Seq[T any] struct {
+	node *node[T]
+}
+
+func (s Seq[T]) Get(i int) T {
+	return get(s.node, uint64(i))
+}
+
+func (s Seq[T]) Set(i int, val T) Seq[T] {
+	return Seq[T]{node: set(s.node, uint64(i), val)}
+}
+
+func (s Seq[T]) Ins(i int, val T) Seq[T] {
+	return Seq[T]{node: ins(s.node, uint64(i), val)}
+}
+
+func (s Seq[T]) Del(i int) Seq[T] {
+	return Seq[T]{node: del(s.node, uint64(i))}
+}
+
+func (s Seq[T]) Iter(f func(i int, val T) bool) {
+	i := 0
+	iter(s.node, func(val T) bool {
+		ok := f(i, val)
+		i++
+		return ok
+	})
+}
+
+func (s Seq[T]) Len() int {
+	return int(weight(s.node))
+}
+
+func (s Seq[T]) Depth() int {
+	return int(height(s.node))
+}
+
+func (s Seq[T]) Split(i int) (Seq[T], Seq[T]) {
+	n1, n2 := split(s.node, uint64(i))
+	return Seq[T]{node: n1}, Seq[T]{node: n2}
+}
+
+func (s Seq[T]) Merge(other Seq[T]) Seq[T] {
+	n1, n2 := s.node, other.node
+	n3 := merge(n1, n2)
+	return Seq[T]{node: n3}
+}
+
+func (s Seq[T]) Repr() []T {
+	buffer := make([]T, 0, s.Len())
+	s.Iter(func(i int, val T) bool {
+		buffer = append(buffer, val)
+		return true
+	})
+	return buffer
+}
+./util/persistent/seq/node.go
+package seq
+
+// implement persistent sequence using weight-balanced tree
+
+type node[T any] struct {
+	weight uint64
+	height uint64
+	entry  T
+	left   *node[T]
+	right  *node[T]
+}
+
+func height[T any](n *node[T]) uint64 {
+	if n == nil {
+		return 0
+	}
+	return n.height
+}
+
+func weight[T any](n *node[T]) uint64 {
+	if n == nil {
+		return 0
+	}
+	return n.weight
+}
+
+func makeNode[T any](entry T, left *node[T], right *node[T]) *node[T] {
+	return &node[T]{
+		weight: 1 + weight(left) + weight(right),
+		height: 1 + max(height(left), height(right)),
+		entry:  entry,
+		left:   left,
+		right:  right,
+	}
+}
+
+func get[T any](n *node[T], i uint64) T {
+	if n == nil {
+		panic("index out of range")
+	}
+	if i < weight(n.left) {
+		return get(n.left, i)
+	}
+	if i < weight(n.left)+1 {
+		return n.entry
+	}
+	if i < weight(n.left)+1+weight(n.right) {
+		return get(n.right, i-(weight(n.left)+1))
+	}
+	panic("index out of range")
+}
+
+func iter[T any](n *node[T], f func(e T) bool) bool {
+	if n == nil {
+		return true // continue
+	}
+
+	ok := iter(n.left, f)
+	if !ok {
+		return false
+	}
+	ok = f(n.entry)
+	if !ok {
+		return false
+	}
+	return iter(n.right, f)
+}
+
+const delta uint64 = 3
+
+type ordering int
+
+const (
+	orderingEq ordering = 0
+	orderingGt ordering = +1
+	orderingLt ordering = -1
+)
+
+// cmp - returns orderingEq, orderingGt, or orderingLt
+func cmp[T any](n *node[T]) ordering {
+	if n == nil {
+		return orderingEq
+	} else {
+		l, r := weight(n.left), weight(n.right)
+		if l+r <= 1 {
+			return orderingEq
+		} else if l > delta*r {
+			return orderingGt
+		} else if delta*l < r {
+			return orderingLt
+		} else {
+			return orderingEq
+		}
+	}
+}
+
+func rightRotate[T any](n *node[T]) *node[T] {
+	// assume n is non-nil
+	if n == nil {
+		panic("not_here")
+	}
+
+	// right rotate
+	//         n
+	//   l           r
+	// ll lr
+	//
+	//      becomes
+	//
+	//         l
+	//   ll          n
+	//             lr r
+
+	l, r := n.left, n.right
+	ll, lr := l.left, l.right
+
+	n1 := makeNode(n.entry, lr, r)
+	l1 := makeNode(l.entry, ll, n1)
+	return l1
+}
+
+func leftRotate[T any](n *node[T]) *node[T] {
+	// assume n is non-nil
+	if n == nil {
+		panic("not_here")
+	}
+
+	// left rotate
+	//         n
+	//   l           r
+	//             rl rr
+	//
+	//      becomes
+	//
+	//         r
+	//   n          rr
+	//  l rl
+
+	r, l := n.right, n.left
+	rl, rr := r.left, r.right
+	n1 := makeNode(n.entry, l, rl)
+	r1 := makeNode(r.entry, n1, rr)
+	return r1
+}
+
+func balance[T any](n *node[T]) *node[T] {
+	// assuming δ ≥ 3
+	// assuming the two subtrees n.left and n.right are balanced
+	// do single rotation or double rotation to rebalance the tree
+	// double rotation is necessary - see `why_double_rotation.jpeg`
+	// will be be sufficient for merge? TODO
+
+	switch cmp(n) {
+	case orderingEq:
+		return n
+	case orderingGt:
+		n1 := rightRotate(n)
+		if cmp(n1) == orderingEq {
+			return n1
+		} else {
+			l := n.left
+			l1 := leftRotate(l)
+			n2 := makeNode(n.entry, l1, n.right)
+			n3 := rightRotate(n2)
+			return n3
+		}
+	case orderingLt:
+		n1 := leftRotate(n)
+		if cmp(n1) == orderingEq {
+			return n1
+		} else {
+			r := n.right
+			r1 := rightRotate(r)
+			n2 := makeNode(n.entry, n.left, r1)
+			n3 := leftRotate(n2)
+			return n3
+		}
+	default:
+		panic("not_here")
+	}
+}
+
+func set[T any](n *node[T], i uint64, entry T) *node[T] {
+	if n == nil {
+		panic("index out of range")
+	}
+	if i < weight(n.left) {
+		l1 := set(n.left, i, entry)
+		n1 := makeNode(n.entry, l1, n.right)
+		return balance(n1)
+	}
+	if i < weight(n.left)+1 {
+		n1 := makeNode(entry, n.left, n.right)
+		return n1
+	}
+	if i < weight(n.left)+1+weight(n.right) {
+		r1 := set(n.right, i-(weight(n.left)+1), entry)
+		n1 := makeNode(n.entry, n.left, r1)
+		return balance(n1)
+	}
+	panic("index out of range")
+}
+
+func ins[T any](n *node[T], i uint64, entry T) *node[T] {
+	if n == nil && i > 0 {
+		panic("index out of range")
+	}
+	if n == nil && i == 0 {
+		return makeNode(entry, nil, nil)
+	}
+	if i < weight(n.left) {
+		l1 := ins(n.left, i, entry)
+		n1 := makeNode(n.entry, l1, n.right)
+		return balance(n1)
+	}
+	if i < weight(n.left)+1 {
+		r1 := ins(n.right, 0, n.entry)
+		n1 := makeNode(entry, n.left, r1)
+		return balance(n1)
+	}
+	if i <= weight(n.left)+1+weight(n.right) { // we handle both < and =
+		r1 := ins(n.right, i-(weight(n.left)+1), entry)
+		n1 := makeNode(n.entry, n.left, r1)
+		return balance(n1)
+	}
+	panic("index out of range")
+}
+
+func del[T any](n *node[T], i uint64) *node[T] {
+	if n == nil {
+		panic("index out of range")
+	}
+	if i < weight(n.left) {
+		l1 := del(n.left, i)
+		n1 := makeNode(n.entry, l1, n.right)
+		return balance(n1)
+	}
+	if i < weight(n.left)+1 {
+		if weight(n.right) == 0 {
+			return n.left
+		}
+		entry := get(n.right, 0)
+		r1 := del(n.right, 0)
+		n1 := makeNode(entry, n.left, r1)
+		return balance(n1)
+	}
+	if i < weight(n.left)+1+weight(n.right) {
+		r1 := del(n.right, i-(weight(n.left)+1))
+		n1 := makeNode(n.entry, n.left, r1)
+		return balance(n1)
+	}
+	panic("index out of range")
+}
+
+func merge[T any](l *node[T], r *node[T]) *node[T] {
+	if l == nil {
+		return r
+	}
+	if r == nil {
+		return l
+	}
+	// small optimization, we delete from the larger subtree
+	wl, wr := weight(l), weight(r)
+	if wl > wr {
+		entry := get(l, wl-1)
+		l1 := del(l, wl-1)
+		n1 := makeNode(entry, l1, r)
+		return balance(n1)
+	} else {
+		entry := get(r, 0)
+		r1 := del(r, 0)
+		n1 := makeNode(entry, l, r1)
+		return balance(n1)
+	}
+}
+
+// split - ([0, 1, 2, 3, 4], 2) -> [0, 1] , [2, 3, 4]
+func split[T any](n *node[T], i uint64) (*node[T], *node[T]) {
+	if n == nil {
+		return nil, nil
+	}
+	if i <= 0 {
+		return nil, n
+	}
+	if i < weight(n.left) {
+		ll1, lr1 := split(n.left, i)
+		n1 := makeNode(n.entry, lr1, n.right)
+		n2 := balance(n1)
+		return ll1, n2
+	}
+	if i < weight(n.left)+1 {
+		r1 := ins(n.right, 0, n.entry)
+		return n.left, r1
+	}
+	if i < weight(n.left)+1+weight(n.right) {
+		rl1, rr1 := split(n.right, i-(weight(n.left)+1))
+		n1 := makeNode(n.entry, n.left, rl1)
+		n2 := balance(n1)
+		return n2, rr1
+	}
+	return n, nil
+}
+
+// helper functions for monad
+
+func _pure[T any](entry T) *node[T] {
+	return makeNode(entry, nil, nil)
+}
+
+func _map[T any, T1 any](n *node[T], f func(T) T1) *node[T1] {
+	if n == nil {
+		return nil
+	}
+	return makeNode(f(n.entry), _map[T, T1](n.left, f), _map[T, T1](n.right, f))
+}
+
+func _seq[T any, T1 any](fs *node[func(T) T1], xs *node[T]) *node[T1] {
+	var ys *node[T1] = nil
+	iter(fs, func(f func(T) T1) bool {
+		ys = merge(ys, _map(xs, f))
+		return true
+	})
+	return ys
+}
+
+func _bind[T any, T1 any](xs *node[T], f func(T) *node[T1]) *node[T1] {
+	var ys *node[T1] = nil
+	iter(xs, func(x T) bool {
+		ys = merge(ys, f(x))
+		return true
+	})
+	return ys
+}
+./util/persistent/stack/stack.go
+package stack
+
+func Empty[T any]() Stack[T] {
+	return Stack[T]{node: nil}
+}
+
+type Stack[T any] struct {
+	node *node[T]
+}
+
+func (s Stack[T]) Peek() T {
+	return s.node.value
+}
+
+func (s Stack[T]) Pop() Stack[T] {
+	return Stack[T]{
+		node: s.node.next,
+	}
+}
+
+func (s Stack[T]) Depth() int {
+	return int(depth(s.node))
+}
+
+func (s Stack[T]) Push(v T) Stack[T] {
+	return Stack[T]{
+		node: newNode(v, s.node),
+	}
+}
+
+func (s Stack[T]) Iter(f func(i int, val T) bool) {
+	length := s.Depth()
+	if length == 0 {
+		return
+	}
+	if ok := f(length-1, s.node.value); !ok {
+		return
+	}
+	s.Pop().Iter(f)
+}
+
+func (s Stack[T]) Repr() []T {
+	buffer := make([]T, 0, s.Depth())
+	s.Iter(func(i int, val T) bool {
+		buffer = append(buffer, val)
+		return true
+	})
+	return buffer
+}
+./util/persistent/stack/node.go
+package stack
+
+type node[T any] struct {
+	value T
+	depth uint
+	next  *node[T]
+}
+
+func depth[T any](n *node[T]) uint {
+	if n == nil {
+		return 0
+	}
+	return n.depth
+}
+
+func newNode[T any](value T, next *node[T]) *node[T] {
+	return &node[T]{
+		value: value,
+		depth: depth(next) + 1,
+		next:  next,
+	}
+}
+./util/subsciber_pool/subscriber_pool.go
+package subsciber_pool
+
+import (
+	"sync/atomic"
+
+	"microscope/util/sync_util"
+)
+
+type Pool[T any] struct {
+	handlerMap *sync_util.Map[uint64, T]
+	lastKey    uint64
+}
+
+func New[T any]() *Pool[T] {
+	return &Pool[T]{
+		handlerMap: &sync_util.Map[uint64, T]{},
+		lastKey:    0,
+	}
+}
+
+func (p *Pool[T]) Subscribe(a T) uint64 {
+	key := atomic.AddUint64(&p.lastKey, 1)
+	p.handlerMap.Store(key, a)
+	return key
+}
+
+func (p *Pool[T]) Unsubscribe(key uint64) {
+	p.handlerMap.Delete(key)
+}
+
+func (p *Pool[T]) Iter(f func(k uint64, v T) bool) {
+	p.handlerMap.Range(f)
+}
+./util/file_util/file_util.go
+package file_util
+
+import (
+	"bufio"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"microscope/config"
+	"microscope/util/side_channel"
+)
+
+func NonEmpty(filename string) bool {
+	info, err := os.Stat(filename)
+	if err != nil {
+		return false
+	}
+	if !info.Mode().IsRegular() {
+		return false
+	}
+	return info.Size() > 0
+}
+
+func writeFile(filename string, iter func(f func(i int, val []rune) bool)) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	writer := bufio.NewWriter(file)
+	defer writer.Flush()
+
+	for _, line := range iter {
+		_, err = writer.WriteString(string(line) + "\n")
+		if err != nil {
+			return err
+		}
+	}
+	err = writer.Flush()
+	if err != nil {
+		return err
+	}
+	err = file.Close()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func copyFile(src string, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return err
+	}
+	err = srcFile.Close()
+	if err != nil {
+		return err
+	}
+	err = dstFile.Close()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+func moveFile(dst string, src string) error {
+	// save mode
+	var dstMode fs.FileMode = 0600
+	if dstInfo, err := os.Stat(dst); err == nil {
+		dstMode = dstInfo.Mode()
+	}
+
+	// save file
+	err := os.Rename(src, dst)
+	if err != nil {
+		// try copy file content
+		err = copyFile(src, dst)
+		if err != nil {
+			return err
+		}
+
+		return os.Remove(src)
+	}
+
+	// restore mode
+	err = os.Chmod(dst, dstMode)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func SafeWriteFile(filename string, iter func(f func(i int, val []rune) bool)) error {
+	absPath, _ := filepath.Abs(filename)
+	tmpFilename := filepath.Join(config.Load().TMP_DIR, absPath)
+
+	// make tmp dir
+	err := os.MkdirAll(filepath.Dir(tmpFilename), 0o700)
+	if err != nil {
+		side_channel.WriteLn(err)
+		return err
+	}
+
+	// write into tmp file
+	err = writeFile(tmpFilename, iter)
+	if err != nil {
+		side_channel.WriteLn(err)
+		return err
+	}
+
+	// move tmp file into output file
+	err = moveFile(filename, tmpFilename)
+	if err != nil {
+		side_channel.WriteLn(err)
+		return err
+	}
+	return nil
+}
+./util/sync_util/map.go
+package sync_util
+
+import "sync"
+
+// just a type-safe sync.Map
+
+type Map[K any, V any] struct {
+	m sync.Map
+}
+
+func (sm *Map[K, V]) Clear() {
+	sm.m.Clear()
+}
+
+func (sm *Map[K, V]) CompareAndDelete(key K, old V) (deleted bool) {
+	return sm.m.CompareAndDelete(key, old)
+}
+
+func (sm *Map[K, V]) CompareAndSwap(key K, old V, new V) (swapped bool) {
+	return sm.m.CompareAndSwap(key, old, new)
+}
+
+func (sm *Map[K, V]) Delete(key K) {
+	sm.m.Delete(key)
+}
+
+func zero[T any]() T {
+	var z T
+	return z
+}
+
+func (sm *Map[K, V]) Load(key K) (value V, ok bool) {
+	val, ok := sm.m.Load(key)
+	if !ok {
+		return zero[V](), false
+	}
+	return val.(V), true
+}
+
+func (sm *Map[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
+	val, loaded := sm.m.LoadAndDelete(key)
+	if !loaded {
+		return zero[V](), false
+	}
+	return val.(V), true
+}
+
+func (sm *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
+	act, loaded := sm.m.LoadOrStore(key, value)
+	return act.(V), loaded
+}
+
+func (sm *Map[K, V]) Range(f func(key K, value V) bool) {
+	sm.m.Range(func(key, value any) bool {
+		return f(key.(K), value.(V))
+	})
+}
+
+func (sm *Map[K, V]) Store(key K, value V) {
+	sm.m.Store(key, value)
+}
+
+func (sm *Map[K, V]) Swap(key K, value V) (previous V, loaded bool) {
+	prev, loaded := sm.m.Swap(key, value)
+	if !loaded {
+		return zero[V](), false
+	}
+	return prev.(V), loaded
+}
+./util/side_channel/side_channel.go
+package side_channel
+
+import (
+	"fmt"
+	"os"
+	"runtime"
+	"sync"
+)
+
+var (
+	mu              sync.Mutex = sync.Mutex{}
+	writeCount      bool       = false
+	sideChannelPath string     = ".side_channel.log"
+)
+
+func SetOutput(path string) {
+	mu.Lock()
+	defer mu.Unlock()
+	sideChannelPath = path
+}
+
+func writeln(vs []any, msg string) bool {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if !writeCount { // first call
+		writeCount = true
+		_ = os.Remove(sideChannelPath)
+	}
+
+	prepend := func(vs []any, v any) []any {
+		return append([]any{v}, vs...)
+	}
+	f, err := os.OpenFile(sideChannelPath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	_, _ = fmt.Fprintln(f, prepend(vs, msg)...)
+	return true
+}
+
+func Panic(vs ...any) {
+	_, file, line, ok := runtime.Caller(1)
+	if !ok {
+		writeln(vs, "exit from unknown location")
+		os.Exit(1)
+	}
+
+	writeln(vs, fmt.Sprintf("%s:%d", file, line))
+	os.Exit(1)
+}
+
+func WriteLn(vs ...any) {
+	_, file, line, ok := runtime.Caller(1)
+	if !ok {
+		writeln(vs, "exit from unknown location")
+		os.Exit(1)
+	}
+	ok = writeln(vs, fmt.Sprintf("%s:%d", file, line))
+	if !ok {
+		os.Exit(1)
+	}
+}
+./util/buffer/chunk.go
+package buffer
+
+import (
+	"runtime"
+	"sync"
+	"sync/atomic"
+)
+
+// TODO - experimental for core.text.Line
+
+/*
+Chunk contains a single int64
+if kvstore < 0, it is the key to a value of type T in pool
+if kvstore >= 0, it is the byte offset in reader
+*/
+
+type Chunk[T any] struct {
+	raw int64 // 8 bytes
+	_   *bool
+}
+
+var pool = &sync.Map{} // map[uint64]any
+var lastKey = int64(0)
+
+func NewChunkFromData[T any](data T, cancel func()) *Chunk[T] {
+	key := atomic.AddInt64(&lastKey, -1)
+	pool.Store(key, data)
+	line := Chunk[T]{
+		raw: key,
+	}
+	runtime.AddCleanup(&line, func(key int64) {
+		defer cancel()
+		pool.Delete(key)
+	}, key)
+	return &line
+}
+
+func NewChunkFromOffset[T any](offset int64) *Chunk[T] {
+	if offset < 0 {
+		panic("invalid offset")
+	}
+	return &Chunk[T]{
+		raw: offset,
+	}
+}
+
+func (l *Chunk[T]) Repr(reader Reader, delim byte, unmarshal func([]byte) T) T {
+	i := l.raw
+	if i >= 0 {
+		buf := make([]byte, 0)
+		for i < int64(reader.Len()) {
+			b := reader.At(int(i))
+			if b == delim {
+				break
+			}
+			buf = append(buf, b)
+		}
+		return unmarshal(buf)
+	} else {
+		buf, ok := pool.Load(i)
+		if !ok {
+			panic("invalid line")
+		}
+		return buf.(T)
+	}
+}
+./util/buffer/reader.go
+package buffer
+
+type Reader interface {
+	Len() int
+	At(i int) byte
+}
+
+type SliceReader struct {
+	reader Reader
+	beg    int
+	len    int
+}
+
+func (s SliceReader) Len() int {
+	return s.len
+}
+
+func (s SliceReader) At(i int) byte {
+	return s.reader.At(i + s.beg)
+}
+
+func Slice(reader Reader, beg int, end int) Reader {
+	if r, ok := reader.(SliceReader); ok {
+		return SliceReader{
+			reader: r.reader,
+			beg:    r.beg + beg,
+			len:    end - beg,
+		}
+	} else {
+		return SliceReader{
+			reader: reader,
+			beg:    beg,
+			len:    end - beg,
+		}
+	}
+}
+
+func NewMemReader(b []byte) Reader {
+	return &memBuffer{b: b}
+}
+
+type memBuffer struct {
+	b []byte
+}
+
+func (m *memBuffer) Len() int {
+	return len(m.b)
+}
+
+func (m *memBuffer) At(i int) byte {
+	return m.b[i]
+}
+./config/config.go
+package config
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"microscope/util/side_channel"
+)
+
+const VERSION = "0.1.9"
+
+const HELP = `
+Usage: "microscope [option] file [logfile]"
+Options:
+  -h --help           show help
+  -v --version        get version
+  -r --replay         replay the edited file 
+  -l --log_writer            print the human readable log_writer format
+  -i --insert         open with INSERT mode
+  -c --command        open with NORMAL/COMMAND/VISUAL/INSERT mode
+     --unsafe         open with UNSAFE mode
+
+Keyboard Shortcuts:
+  Ctrl+C              exit
+  Ctrl+S              flush log_writer (autosave is always on, so this is not necessary)
+  Ctrl+U              undo
+  Ctrl+R              redo
+
+NORMAL/COMMAND/VISUAL/INSERT mode:
+  in NORMAL mode:
+    i                 enter INSERT mode
+    :                 enter COMMAND mode
+    V                 enter VISUAL mode
+    p                 paste from clipboard
+  in COMMAND mode:
+    ENTER             execute command
+    ESCAPE            delete command buffer and enter NORMAL mode
+  in INSERT mode:
+    ESCAPE            enter NORMAL mode
+  in VISUAL mode:
+    up,dn,pgup,pgdn   move cursor and selector
+    d                 cut into clipboard
+    y                 copy into clipboard
+    ESCAPE            enter NORMAL mode
+
+Commands:
+  :i :insert        enter INSERT mode
+  / :s :search                search
+  :regex         search with regex
+  : :g :goto          goto line
+  :w :write         write into file
+  :q :quit          quit
+`
+
+const (
+	HUMAN_READABLE_SERIALIZER = 0
+	BINARY_SERIALIZER         = 1
+)
+
+type Config struct {
+	DEBUG                      bool
+	VERSION                    string
+	HELP                       string
+	LOG_AUTOFLUSH_INTERVAL     time.Duration
+	LOADING_PROGRESS_INTERVAL  time.Duration
+	SERIALIZER_VERSION         uint64
+	INITIAL_SERIALIZER_VERSION uint64
+	MAXSIZE_HISTORY_STACK      int
+	VIEW_CHANNEL_SIZE          int
+	MAX_SEACH_TIME             time.Duration
+	TAB_SIZE                   int
+	LOG_DIR                    string
+	TMP_DIR                    string
+	SCROLL_SPEED               int
+	LOAD_ESCAPE_INTERVAL       time.Duration
+}
+
+func (c Config) String() string {
+	b, _ := json.Marshal(c)
+	return string(b)
+}
+
+var mu sync.Mutex = sync.Mutex{}
+var config *Config = nil
+
+func loadDefaultConfig() *Config {
+	tempDir := os.TempDir()
+	defaultLogDir := filepath.Join(tempDir, "microscope", "log")
+	defaultTmpDir := filepath.Join(tempDir, "microscope", "tmp")
+	debug := len(os.Getenv("DEBUG")) > 0
+	// TODO - export these into environment variables
+	config := &Config{
+		DEBUG:                      debug,
+		VERSION:                    VERSION,
+		HELP:                       HELP,
+		LOG_AUTOFLUSH_INTERVAL:     60 * time.Second,
+		LOADING_PROGRESS_INTERVAL:  100 * time.Millisecond,
+		SERIALIZER_VERSION:         HUMAN_READABLE_SERIALIZER, // TODO - update serializer and enable binary version
+		INITIAL_SERIALIZER_VERSION: HUMAN_READABLE_SERIALIZER,
+		MAXSIZE_HISTORY_STACK:      1024,
+		VIEW_CHANNEL_SIZE:          64,
+		MAX_SEACH_TIME:             5 * time.Second,
+		TAB_SIZE:                   2,
+		LOG_DIR:                    defaultLogDir,
+		TMP_DIR:                    defaultTmpDir,
+		SCROLL_SPEED:               3,
+		LOAD_ESCAPE_INTERVAL:       100 * time.Millisecond,
+	}
+	side_channel.WriteLn("config:", config.String())
+	return config
+}
+
+func Load() *Config {
+	mu.Lock()
+	defer mu.Unlock()
+	if config == nil {
+		config = loadDefaultConfig()
+	}
+	return config
+}
+do you have any comment on this?

@@ -3,27 +3,21 @@ set -e
 rm -rf bin
 mkdir -p bin
 
-# Requires `cross` (cargo install cross) and Docker for cross-compilation.
-# For native build only: cargo build --release
+# Native build (always works)
+cargo build --release
+cp target/release/microscope bin/microscope_darwin_arm64
+chmod +x bin/microscope_darwin_arm64
 
-## linux_amd64
-cross build --release --target x86_64-unknown-linux-gnu &
-## linux_arm64
-cross build --release --target aarch64-unknown-linux-gnu &
-## linux_riscv64
-cross build --release --target riscv64gc-unknown-linux-gnu &
-## darwin_arm64 (must build natively on macOS; cross does not support it)
-# cargo build --release --target aarch64-apple-darwin
-## windows_amd64
-cross build --release --target x86_64-pc-windows-gnu &
-## windows_arm64
-cross build --release --target aarch64-pc-windows-gnullvm &
-wait
-
-cp target/x86_64-unknown-linux-gnu/release/microscope       bin/microscope_linux_amd64
-cp target/aarch64-unknown-linux-gnu/release/microscope      bin/microscope_linux_arm64
-cp target/riscv64gc-unknown-linux-gnu/release/microscope    bin/microscope_linux_riscv64
-cp target/x86_64-pc-windows-gnu/release/microscope.exe      bin/microscope_windows_amd64.exe
-cp target/aarch64-pc-windows-gnullvm/release/microscope.exe bin/microscope_windows_arm64.exe
-
-chmod +x bin/microscope_linux_*
+# Cross-compilation targets — requires `cross` (cargo install cross) and Docker.
+# Uncomment to build additional targets:
+# cross build --release --target x86_64-unknown-linux-gnu &
+# cross build --release --target aarch64-unknown-linux-gnu &
+# cross build --release --target riscv64gc-unknown-linux-gnu &
+# cross build --release --target x86_64-pc-windows-gnu &
+# cross build --release --target aarch64-pc-windows-gnullvm &
+# wait
+# cp target/x86_64-unknown-linux-gnu/release/microscope       bin/microscope_linux_amd64
+# cp target/aarch64-unknown-linux-gnu/release/microscope      bin/microscope_linux_arm64
+# cp target/riscv64gc-unknown-linux-gnu/release/microscope    bin/microscope_linux_riscv64
+# cp target/x86_64-pc-windows-gnu/release/microscope.exe      bin/microscope_windows_amd64.exe
+# cp target/aarch64-pc-windows-gnullvm/release/microscope.exe bin/microscope_windows_arm64.exe

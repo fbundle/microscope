@@ -48,6 +48,7 @@
 - fixed empty command
 - rename the project from `telescope` into `microscope` - initially I thought of microscope but didn't connect to the english word
 - fix WBT for the case adding single lines (not for merging and cutting multiple lines)
+- replace `util/persistent/seq` weight-balanced tree with a 2-3 finger tree (Hinze & Paterson, 2006), ported from Haskell `fingertree-0.1.6.3`; PushFront/PushBack now O(1) amortised, Merge stays O(log min(n₁,n₂)); depth confirmed ≤ log₃(n) in practice across adversarial stress tests (see `util/persistent/seq/TEST_REPORT.md`)
 
 # TODO
 

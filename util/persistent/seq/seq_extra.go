@@ -10,13 +10,14 @@ func (s Seq[T]) Back() T {
 
 func (s Seq[T]) PushFront(vals ...T) Seq[T] {
 	for i := len(vals) - 1; i >= 0; i-- {
-		s = s.Ins(0, vals[i])
+		s = Seq[T]{t: pushFront(vals[i], s.t)}
 	}
 	return s
 }
+
 func (s Seq[T]) PushBack(vals ...T) Seq[T] {
 	for i := 0; i < len(vals); i++ {
-		s = s.Ins(s.Len(), vals[i])
+		s = Seq[T]{t: pushBack(s.t, vals[i])}
 	}
 	return s
 }
@@ -39,6 +40,7 @@ func (s Seq[T]) IndexOf(pred func(T) bool) int {
 	}
 	return index
 }
+
 func (s Seq[T]) Contains(pred func(T) bool) bool {
 	return s.IndexOf(pred) >= 0
 }
@@ -50,31 +52,4 @@ func (s Seq[T]) Slice(beg int, end int) Seq[T] {
 	s, _ = s.Split(end)
 	_, s = s.Split(beg)
 	return s
-}
-
-func Merge[T any](ss ...Seq[T]) Seq[T] {
-	if len(ss) == 0 {
-		return Empty[T]()
-	}
-	s := ss[0]
-	for i := 1; i < len(ss); i++ {
-		s = s.Merge(ss[i])
-	}
-	return s
-}
-
-// monad
-
-func Fmap[T any, T1 any](xs Seq[T], f func(T) T1) Seq[T1] {
-	return Seq[T1]{node: _map(xs.node, f)}
-}
-
-func Ap[T any, T1 any](fs Seq[func(T) T1], xs Seq[T]) Seq[T1] {
-	return Seq[T1]{node: _seq(fs.node, xs.node)}
-}
-
-func Bind[T any, T1 any](s Seq[T], f func(T) Seq[T1]) Seq[T1] {
-	return Seq[T1]{node: _bind(s.node, func(x T) *node[T1] {
-		return f(x).node
-	})}
 }

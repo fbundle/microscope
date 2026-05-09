@@ -1,6 +1,6 @@
 module microscope
 
-go 1.26.1
+go 1.26.2
 
 require (
 	github.com/gdamore/tcell/v2 v2.13.8

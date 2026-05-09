@@ -1,8 +1,0 @@
-#/!usr/bin/env bash
-
-echo "below is the readme and implementation of a text editor"
-
-find . -name "*.md" -type f -print -exec cat {} \;
-find . -name "*.go" -type f -print -exec cat {} \;
-
-echo "do you have any comment on this?"

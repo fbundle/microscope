@@ -9,11 +9,6 @@ an extremely fast text editor
 
 - a Rust port is available on the [`claude_rust`](https://github.com/fbundle/microscope/tree/claude_rust) branch — reduces the line-index footprint from 16 bytes to 8 bytes per line using a tagged pointer (not possible in Go due to GC constraints)
 
-- refer to [github.com/fbundle/wbt](https://github.com/fbundle/wbt) for WBT
-
-- the current implementation of weight-balanced tree doesn't support efficient merging
-
-
 ## FEATURE SET
 
 - basic text editor

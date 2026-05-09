@@ -35,4 +35,5 @@ go.work.sum
 *.json
 *.log
 bin
+target
 

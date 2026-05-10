@@ -1,7 +1,10 @@
 # microscope
 
-an extremely fast text editor
+Most text editors load a file into memory, mutate it, and write it back. This breaks down on large files — a 10 GB log, a 100 GB database dump, a 1 TB dataset.
 
+Microscope takes a different approach. It never modifies the original file. Instead it records edits as a compact, append-only event log. The original file is memory-mapped and treated as immutable storage; the internal text representation is a persistent data structure that shares structure with prior versions rather than copying bytes. Opening a 1 TB file is instantaneous — no bytes are read until you look at them. Saving is instantaneous — nothing is written to the original file until an explicit `:w`.
+
+The event log is a first-class artifact: small, versioned, and replayable. A future file format will pair the original file with its log as a single unit — the file as the base, the log as the diff — analogous to how Git stores a repository but applied to individual file editing.
 
 ![screenshot](./screenshots/0_1_2.png)
 

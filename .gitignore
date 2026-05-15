@@ -36,4 +36,5 @@ go.work.sum
 *.log
 bin
 target
+run_claude
 
